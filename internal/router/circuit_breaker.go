@@ -49,6 +49,10 @@ type CircuitBreaker struct {
 	openedAt   atomic.Int64 // unix nano when state became Open
 	successes  atomic.Uint64
 	failures   atomic.Uint64
+	// lastActivity is the unix nano of the most recent Allow/Record* call.
+	// Read by BreakerRegistry.Evict to drop idle entries (Rust parity:
+	// circuit_breaker_registry.rs::evict_idle).
+	lastActivity atomic.Int64
 
 	mu     sync.Mutex
 	window []bool // true=success, false=failure; ring buffer
@@ -60,6 +64,7 @@ type CircuitBreaker struct {
 func NewCircuitBreaker(cfg BreakerConfig) *CircuitBreaker {
 	cb := &CircuitBreaker{cfg: cfg, window: make([]bool, cfg.WindowSize)}
 	cb.state.Store(int32(CircuitClosed))
+	cb.lastActivity.Store(time.Now().UnixNano())
 	return cb
 }
 
@@ -81,6 +86,7 @@ func (cb *CircuitBreaker) State() CircuitState {
 // Allow checks whether a request is permitted. Returns ErrCircuitOpen
 // when the breaker is open and the open-timeout hasn't elapsed.
 func (cb *CircuitBreaker) Allow() error {
+	cb.lastActivity.Store(time.Now().UnixNano())
 	if cb.State() == CircuitOpen {
 		return ErrCircuitOpen
 	}
@@ -90,6 +96,7 @@ func (cb *CircuitBreaker) Allow() error {
 // RecordSuccess records a successful request.
 func (cb *CircuitBreaker) RecordSuccess() {
 	cb.successes.Add(1)
+	cb.lastActivity.Store(time.Now().UnixNano())
 	cb.appendOutcome(true)
 	// Half-open trial succeeded → close.
 	cb.state.CompareAndSwap(int32(CircuitHalfOpen), int32(CircuitClosed))
@@ -98,6 +105,7 @@ func (cb *CircuitBreaker) RecordSuccess() {
 // RecordFailure records a failure and may trip the breaker.
 func (cb *CircuitBreaker) RecordFailure() {
 	cb.failures.Add(1)
+	cb.lastActivity.Store(time.Now().UnixNano())
 	cb.appendOutcome(false)
 
 	// Half-open trial failed → re-open.
@@ -195,4 +203,54 @@ func (r *BreakerRegistry) Snapshot() map[string]BreakerStats {
 		out[url] = cb.Stats()
 	}
 	return out
+}
+
+// Evict drops breakers whose last Allow/RecordSuccess/RecordFailure
+// happened more than maxIdle ago. Returns the eviction count. Mirrors
+// crates/fc-router/src/circuit_breaker_registry.rs::evict_idle —
+// prevents unbounded growth when many short-lived endpoint URLs flow
+// through the router. Safe to call concurrently with normal traffic.
+func (r *BreakerRegistry) Evict(maxIdle time.Duration) int {
+	if maxIdle <= 0 {
+		return 0
+	}
+	// Two-phase: read-lock to collect candidates so the write-lock window
+	// is as short as possible.
+	r.mu.RLock()
+	if len(r.m) == 0 {
+		r.mu.RUnlock()
+		return 0
+	}
+	cutoff := time.Now().Add(-maxIdle).UnixNano()
+	idle := make([]string, 0, len(r.m))
+	for url, cb := range r.m {
+		if cb.lastActivity.Load() < cutoff {
+			idle = append(idle, url)
+		}
+	}
+	r.mu.RUnlock()
+	if len(idle) == 0 {
+		return 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	evicted := 0
+	for _, url := range idle {
+		cb, ok := r.m[url]
+		// Re-check under the write lock: activity may have resumed between
+		// the read-lock collection and the write-lock acquisition.
+		if !ok || cb.lastActivity.Load() >= cutoff {
+			continue
+		}
+		delete(r.m, url)
+		evicted++
+	}
+	return evicted
+}
+
+// Len reports the number of active breakers in the registry.
+func (r *BreakerRegistry) Len() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.m)
 }

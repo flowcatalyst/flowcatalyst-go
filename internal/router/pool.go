@@ -26,7 +26,12 @@ type Pool struct {
 	limiter   *RateLimiter
 	tracker   *InFlightTracker
 
-	sem chan struct{} // concurrency semaphore
+	// sem is the pool-wide concurrency semaphore. Buffered with capacity
+	// = cfg.Concurrency. Owners: every drainGroup goroutine sends on it
+	// before processOne and receives after. Closed: never — lives for the
+	// Pool's lifetime. A send blocks when concurrency is saturated; the
+	// matching `<-p.sem` after processOne releases a slot.
+	sem chan struct{}
 
 	mu         sync.Mutex
 	groupQs    map[string]*groupQueue // ordered FIFO queues per message-group
@@ -34,10 +39,35 @@ type Pool struct {
 	stopped    atomic.Bool
 }
 
-// groupQueue is the per-message-group buffer.
+// groupQueue is the per-message-group buffer. High-priority messages
+// (Message.HighPriority=true) drain ahead of regular messages within
+// the same group; ordering within each priority class is FIFO. Mirrors
+// the Rust MessageGroupHandler in crates/fc-router/src/pool.rs:99-140
+// where high_priority and regular sit in separate VecDeques and the
+// drain loop pops high_priority first.
 type groupQueue struct {
-	msgs    []common.QueuedMessage
-	working bool
+	highPriority []common.QueuedMessage
+	regular      []common.QueuedMessage
+	working      bool
+}
+
+// pop returns the next message to dispatch (high-priority first) and
+// whether the queue is now empty. Caller holds p.mu.
+func (gq *groupQueue) pop() (common.QueuedMessage, bool) {
+	if len(gq.highPriority) > 0 {
+		m := gq.highPriority[0]
+		gq.highPriority = gq.highPriority[1:]
+		return m, len(gq.highPriority) == 0 && len(gq.regular) == 0
+	}
+	m := gq.regular[0]
+	gq.regular = gq.regular[1:]
+	return m, len(gq.highPriority) == 0 && len(gq.regular) == 0
+}
+
+// empty reports whether the queue holds no pending messages. Caller
+// holds p.mu.
+func (gq *groupQueue) empty() bool {
+	return len(gq.highPriority) == 0 && len(gq.regular) == 0
 }
 
 // NewPool wires a pool. tracker may be nil; if so, in-flight tracking
@@ -73,7 +103,16 @@ func (p *Pool) Identifier() string { return p.cfg.Code }
 // SetRateLimit hot-swaps the rate-limit-per-minute value.
 func (p *Pool) SetRateLimit(perMinute uint32) { p.limiter.SetRate(perMinute) }
 
-// Run starts the drain loop. Returns when ctx is cancelled.
+// Run starts the drain loop. Owns the polling cadence; spawns one
+// drainGroup goroutine per active message group via tryDrainGroup.
+//
+// Exit conditions (any one returns):
+//   - ctx is cancelled (graceful shutdown via Manager).
+//   - p.Stop() was called (sets stopped=true; observed at top of loop).
+//   - p.consumer.Poll returns an error AND ctx is already cancelled.
+//
+// Run does NOT wait for in-flight drainGroup goroutines to finish.
+// Manager.Shutdown is responsible for joining workers via the wait group.
 func (p *Pool) Run(ctx context.Context) {
 	const maxPoll = 10
 	pollInterval := 100 * time.Millisecond
@@ -82,6 +121,8 @@ func (p *Pool) Run(ctx context.Context) {
 		if p.stopped.Load() {
 			return
 		}
+		// Non-blocking ctx check before poll — exits without paying the
+		// poll round-trip on shutdown.
 		select {
 		case <-ctx.Done():
 			return
@@ -94,6 +135,9 @@ func (p *Pool) Run(ctx context.Context) {
 				return
 			}
 			slog.Warn("pool poll error", "pool", p.cfg.Code, "err", err)
+			// Backoff 1s on transient poll failure. Wakeup conditions:
+			//   <-ctx.Done()       — shutdown; exit immediately.
+			//   <-time.After(1s)   — backoff elapsed; retry the poll.
 			select {
 			case <-ctx.Done():
 				return
@@ -103,6 +147,9 @@ func (p *Pool) Run(ctx context.Context) {
 		}
 
 		if len(msgs) == 0 {
+			// Empty poll — sleep pollInterval before next poll. Wakeup:
+			//   <-ctx.Done()                  — shutdown; exit.
+			//   <-time.After(pollInterval)    — go poll again.
 			select {
 			case <-ctx.Done():
 				return
@@ -136,7 +183,11 @@ func (p *Pool) enqueue(group string, m common.QueuedMessage) {
 		gq = &groupQueue{}
 		p.groupQs[group] = gq
 	}
-	gq.msgs = append(gq.msgs, m)
+	if m.Message.HighPriority {
+		gq.highPriority = append(gq.highPriority, m)
+	} else {
+		gq.regular = append(gq.regular, m)
+	}
 	p.mu.Unlock()
 }
 
@@ -148,7 +199,7 @@ func (p *Pool) enqueue(group string, m common.QueuedMessage) {
 func (p *Pool) tryDrainGroup(ctx context.Context, group string) {
 	p.mu.Lock()
 	gq := p.groupQs[group]
-	if gq == nil || gq.working || len(gq.msgs) == 0 {
+	if gq == nil || gq.working || gq.empty() {
 		p.mu.Unlock()
 		return
 	}
@@ -158,22 +209,35 @@ func (p *Pool) tryDrainGroup(ctx context.Context, group string) {
 	go p.drainGroup(ctx, group)
 }
 
+// drainGroup is the per-message-group worker goroutine spawned by
+// tryDrainGroup. Drains one message at a time from gq.msgs (preserving
+// FIFO order within the group), gated by the pool-wide `sem` semaphore.
+//
+// Exit conditions:
+//   - the group buffer is empty (working flag flipped back to false).
+//   - ctx is cancelled while waiting for a semaphore slot.
+//
+// Note: ctx cancellation between processOne calls does NOT stop the loop
+// — only the semaphore-acquire select is ctx-aware. This is intentional;
+// a cancellation mid-process is handled inside processOne / mediator.
 func (p *Pool) drainGroup(ctx context.Context, group string) {
 	for {
 		p.mu.Lock()
 		gq := p.groupQs[group]
-		if gq == nil || len(gq.msgs) == 0 {
+		if gq == nil || gq.empty() {
 			if gq != nil {
 				gq.working = false
 			}
 			p.mu.Unlock()
 			return
 		}
-		msg := gq.msgs[0]
-		gq.msgs = gq.msgs[1:]
+		msg, _ := gq.pop()
 		p.mu.Unlock()
 
-		// Acquire concurrency token (pool-wide).
+		// Acquire a concurrency slot. Wakeup conditions:
+		//   <-ctx.Done()         — shutdown; abandon this message (it stays
+		//                          on the broker and will be redelivered).
+		//   p.sem <- struct{}{}  — slot acquired; proceed.
 		select {
 		case <-ctx.Done():
 			return
@@ -181,6 +245,8 @@ func (p *Pool) drainGroup(ctx context.Context, group string) {
 		}
 
 		p.processOne(ctx, msg)
+		// Release the concurrency slot. Pairs 1:1 with the send above.
+		// Safe: this goroutine is the only writer of its slot.
 		<-p.sem
 	}
 }

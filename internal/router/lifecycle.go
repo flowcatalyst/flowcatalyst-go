@@ -100,7 +100,17 @@ func (l *LifecycleManager) SetPoolStatsProvider(p PoolStatsProvider) {
 }
 
 // Start spawns the background tasks. Idempotent — only spawns on the
-// first call.
+// first call (guarded by startOnce).
+//
+// Three goroutines are spawned, each owning one ticker-driven loop:
+//   - warningCleanupLoop  — fires every cfg.WarningCleanupInterval.
+//   - consumerHealthLoop  — fires every cfg.ConsumerHealthInterval.
+//   - healthReportLoop    — fires every cfg.HealthReportInterval.
+//
+// Lifecycle contract: each goroutine returns when ctx is cancelled.
+// Shutdown cancels that ctx and blocks on wg.Wait() — so spawning a
+// loop here also obliges incrementing wg.Add(1) (already done) and
+// calling wg.Done() on exit (done via defer inside the closure).
 func (l *LifecycleManager) Start(parent context.Context) {
 	l.startOnce.Do(func() {
 		ctx, cancel := context.WithCancel(parent)
@@ -130,7 +140,14 @@ func (l *LifecycleManager) Start(parent context.Context) {
 }
 
 // Shutdown cancels every background task and blocks until they exit
-// (or ctx is cancelled). Idempotent.
+// (or ctx is cancelled). Idempotent — only the first call cancels
+// (guarded by stopOnce); subsequent calls still block on wg.
+//
+// The `done` channel is an unbuffered signalling channel. It is created
+// fresh per call (Shutdown can be invoked multiple times concurrently),
+// owned by THIS goroutine, closed exactly once by the inner goroutine
+// after wg.Wait returns. Close-after-wait is the standard
+// "wait-group → channel" bridge — gives us a select-able shutdown.
 func (l *LifecycleManager) Shutdown(ctx context.Context) error {
 	l.stopOnce.Do(func() {
 		if l.cancelFn != nil {
@@ -139,6 +156,10 @@ func (l *LifecycleManager) Shutdown(ctx context.Context) error {
 	})
 	done := make(chan struct{})
 	go func() { l.wg.Wait(); close(done) }()
+	// Wakeup conditions:
+	//   <-done       — all loops exited cleanly.
+	//   <-ctx.Done() — caller's shutdown budget expired; abandon the wait
+	//                  (loops may still be running — caller's choice).
 	select {
 	case <-done:
 		return nil
@@ -147,6 +168,15 @@ func (l *LifecycleManager) Shutdown(ctx context.Context) error {
 	}
 }
 
+// warningCleanupLoop runs WarningService.Cleanup on a ticker. The
+// ticker's channel (t.C) is owned by `time.Ticker` and stopped by the
+// deferred t.Stop(); we never close it.
+//
+// Wakeup conditions:
+//   <-ctx.Done() — shutdown; log and exit.
+//   <-t.C        — interval elapsed; run Cleanup. NB: t.C is dropped if
+//                  Cleanup overruns the interval — by design (no
+//                  pile-up).
 func (l *LifecycleManager) warningCleanupLoop(ctx context.Context) {
 	t := time.NewTicker(l.cfg.WarningCleanupInterval)
 	defer t.Stop()
@@ -161,6 +191,12 @@ func (l *LifecycleManager) warningCleanupLoop(ctx context.Context) {
 	}
 }
 
+// consumerHealthLoop runs HealthService.Cleanup on a ticker.
+//
+// Wakeup conditions:
+//   <-ctx.Done() — shutdown.
+//   <-t.C        — interval elapsed; run Cleanup (also runs
+//                  WarningService.Cleanup as a side effect).
 func (l *LifecycleManager) consumerHealthLoop(ctx context.Context) {
 	t := time.NewTicker(l.cfg.ConsumerHealthInterval)
 	defer t.Stop()
@@ -170,13 +206,18 @@ func (l *LifecycleManager) consumerHealthLoop(ctx context.Context) {
 			slog.Info("consumer health loop stopped")
 			return
 		case <-t.C:
-			// HealthService.Cleanup logs stalled consumers + runs
-			// WarningService.Cleanup as a side effect.
 			l.healthService.Cleanup()
 		}
 	}
 }
 
+// healthReportLoop logs the HealthReport on a ticker. Reads
+// poolStatsProvider under RLock — the field is swapped via
+// SetPoolStatsProvider, so reads must be guarded.
+//
+// Wakeup conditions:
+//   <-ctx.Done() — shutdown.
+//   <-t.C        — interval elapsed; gather stats, emit log line.
 func (l *LifecycleManager) healthReportLoop(ctx context.Context) {
 	t := time.NewTicker(l.cfg.HealthReportInterval)
 	defer t.Stop()

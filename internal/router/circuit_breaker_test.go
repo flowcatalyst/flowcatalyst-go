@@ -76,3 +76,34 @@ func TestBreakerRegistryDeduplicates(t *testing.T) {
 	assert.Same(t, a, b)
 	assert.NotSame(t, a, c)
 }
+
+func TestBreakerRegistryEvictsIdle(t *testing.T) {
+	r := router.NewBreakerRegistry(router.DefaultBreakerConfig())
+	idle := r.Get("https://example.com/idle")
+	active := r.Get("https://example.com/active")
+	require.NotNil(t, idle)
+	require.NotNil(t, active)
+	require.Equal(t, 2, r.Len())
+
+	// Keep the active breaker fresh; let the idle one age out by using
+	// a very short maxIdle window.
+	time.Sleep(15 * time.Millisecond)
+	require.NoError(t, active.Allow())
+
+	evicted := r.Evict(10 * time.Millisecond)
+	assert.Equal(t, 1, evicted)
+	assert.Equal(t, 1, r.Len())
+
+	// Re-getting the evicted URL must produce a new breaker, not the
+	// old pointer.
+	after := r.Get("https://example.com/idle")
+	assert.NotSame(t, idle, after)
+}
+
+func TestBreakerRegistryEvictNoop(t *testing.T) {
+	r := router.NewBreakerRegistry(router.DefaultBreakerConfig())
+	_ = r.Get("https://example.com/keep")
+	assert.Equal(t, 0, r.Evict(time.Hour))
+	assert.Equal(t, 0, r.Evict(0)) // zero/negative maxIdle is a no-op
+	assert.Equal(t, 1, r.Len())
+}

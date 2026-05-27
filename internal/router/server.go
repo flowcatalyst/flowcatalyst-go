@@ -36,6 +36,14 @@ type ServerConfig struct {
 	// 15m. Reaper ticks every 5m regardless.
 	InFlightReapMaxAge time.Duration
 
+	// BreakerIdleMaxAge bounds the per-endpoint circuit breaker
+	// registry against unbounded growth from short-lived target URLs.
+	// Zero falls back to 1h, matching Rust
+	// circuit_breaker_registry.rs::evict_idle. The same reaper goroutine
+	// that handles InFlightReapMaxAge calls BreakerRegistry.Evict on
+	// each 5m tick.
+	BreakerIdleMaxAge time.Duration
+
 	// Standby (Redis leader election). When enabled the pool config
 	// watcher only runs while this instance holds the lock.
 	StandbyEnabled  bool
@@ -75,6 +83,9 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 	if cfg.InFlightReapMaxAge == 0 {
 		cfg.InFlightReapMaxAge = 15 * time.Minute
+	}
+	if cfg.BreakerIdleMaxAge == 0 {
+		cfg.BreakerIdleMaxAge = time.Hour
 	}
 
 	s := &Server{
@@ -177,6 +188,10 @@ func (s *Server) Run(ctx context.Context) error {
 	return nil
 }
 
+// reapInFlight is the periodic janitor: it prunes the in-flight tracker
+// (entries older than InFlightReapMaxAge) and the circuit-breaker
+// registry (idle entries older than BreakerIdleMaxAge). Mirrors the
+// Rust stale-entry reaper in lifecycle.rs (5 min cadence).
 func (s *Server) reapInFlight(ctx context.Context) {
 	tick := time.NewTicker(5 * time.Minute)
 	defer tick.Stop()
@@ -187,6 +202,9 @@ func (s *Server) reapInFlight(ctx context.Context) {
 		case <-tick.C:
 			if n := s.Tracker.Reap(s.Cfg.InFlightReapMaxAge); n > 0 {
 				slog.Warn("router reaped stale in-flight entries", "count", n)
+			}
+			if n := s.Breakers.Evict(s.Cfg.BreakerIdleMaxAge); n > 0 {
+				slog.Info("router evicted idle circuit breakers", "count", n)
 			}
 		}
 	}

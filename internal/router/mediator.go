@@ -53,26 +53,24 @@ type MediatorConfig struct {
 	HTTPVersion         HTTPVersion
 	MaxRetries          int
 	RetryDelays         []time.Duration
-	// MaxConcurrentPerHost caps in-flight requests to any single target
-	// host across the whole mediator. 0 disables. Defence-in-depth
-	// against ALB stream-limit overflow and cross-pool fanout to a
-	// shared backend. Default 100 (production); 50 (dev). Go-only
-	// divergence from Rust — reqwest doesn't expose this knob.
-	MaxConcurrentPerHost int
+	// HostPoolSizing tunes the per-host HTTP/2 connection pool (slot
+	// grow/shrink). Mirrors crates/fc-router/src/http_pool.rs sizing.
+	// Zero-value Sizing means "use the default for the negotiated HTTP
+	// version" — DefaultHostPoolSizing for HTTP/2, HTTP1HostPoolSizing
+	// for HTTP/1.1.
+	HostPoolSizing HostPoolSizing
 }
 
 // DefaultMediatorConfig matches the Rust production defaults (15min timeout, HTTP/2).
-// Adds two Go-only transport knobs (TLSHandshakeTimeout,
-// MaxConcurrentPerHost) explicitly — see HANDOFF.md §5.
 func DefaultMediatorConfig() MediatorConfig {
 	return MediatorConfig{
-		Timeout:              15 * time.Minute,
-		ConnectTimeout:       30 * time.Second,
-		TLSHandshakeTimeout:  10 * time.Second,
-		HTTPVersion:          HTTPVersion2,
-		MaxRetries:           3,
-		RetryDelays:          []time.Duration{1 * time.Second, 2 * time.Second, 3 * time.Second},
-		MaxConcurrentPerHost: 100,
+		Timeout:             15 * time.Minute,
+		ConnectTimeout:      30 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+		HTTPVersion:         HTTPVersion2,
+		MaxRetries:          3,
+		RetryDelays:         []time.Duration{1 * time.Second, 2 * time.Second, 3 * time.Second},
+		HostPoolSizing:      DefaultHostPoolSizing(),
 	}
 }
 
@@ -82,82 +80,94 @@ func DevMediatorConfig() MediatorConfig {
 	c.Timeout = 30 * time.Second
 	c.ConnectTimeout = 10 * time.Second
 	c.HTTPVersion = HTTPVersion1
-	c.MaxConcurrentPerHost = 50
+	c.HostPoolSizing = HTTP1HostPoolSizing()
 	return c
 }
 
-// HTTPMediator delivers via net/http.
+// HTTPMediator delivers via net/http with a per-host HTTP/2 connection
+// pool (HostPoolRegistry). Each origin gets one or more *http.Client
+// slots, each backed by its own *http.Transport so the slots' h2
+// connection pools are independent. Mirrors crates/fc-router/src/http_pool.rs.
 type HTTPMediator struct {
-	client *http.Client
-	cfg    MediatorConfig
+	pools *HostPoolRegistry
+	cfg   MediatorConfig
 }
 
 // NewHTTPMediator wires an HTTP mediator with the supplied config.
-// Pool + timeout layout mirrors crates/fc-router/src/mediator.rs
-// (reqwest::Client builder):
+// Each per-slot *http.Client has its own Transport tuned to match
+// crates/fc-router/src/mediator.rs (reqwest::Client builder):
 //
 //   - MaxIdleConnsPerHost = 10           ↔ pool_max_idle_per_host(10)
 //   - IdleConnTimeout = 90s              ↔ reqwest default
 //   - DialContext.Timeout = ConnectTimeout ↔ connect_timeout(...)
 //   - Client.Timeout = Timeout           ↔ timeout(...)
 //
-// Two Go-only additions sit ABOVE strict-Rust parity (HANDOFF.md §5):
+// HTTP/2 specifics:
 //   - http2.Transport.StrictMaxConcurrentStreams=true: honour ALB's
-//     advertised H2 stream limit instead of oversubscribing.
-//   - hostLimiter RoundTripper: per-host concurrency cap regardless of
-//     pool source. Defence-in-depth for ALB-fronted backends.
+//     advertised H2 stream limit instead of oversubscribing inside a
+//     single connection.
+//   - Per-host pool grows additional slots (each a separate h2
+//     connection) when in-flight on every slot exceeds the high
+//     watermark, raising the effective concurrent-stream cap.
 //
 // `ResponseHeaderTimeout` is intentionally NOT set: it would shadow
 // Client.Timeout for the response-header phase only and obscure which
 // timeout is actually enforced. Single source of truth: Client.Timeout.
 func NewHTTPMediator(cfg MediatorConfig) *HTTPMediator {
-	dialer := &net.Dialer{
-		// Mirrors reqwest's `connect_timeout` — bounds TCP connect
-		// (incl. DNS) so a slow target fails fast instead of consuming
-		// the full Client.Timeout budget. Was a silent divergence
-		// before this fix: the field existed on MediatorConfig but
-		// never reached the transport, so prod Go runs effectively
-		// had a 15min connect timeout vs Rust's 30s.
-		Timeout:   cfg.ConnectTimeout,
-		KeepAlive: 30 * time.Second,
-	}
-	transport := &http.Transport{
-		DialContext:         dialer.DialContext,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     90 * time.Second,
-		// Explicit so a Go stdlib default change doesn't silently shift
-		// our TLS handshake budget. Go's current default is 10s; we
-		// match it here so the value is visible at the call site.
-		TLSHandshakeTimeout: cfg.TLSHandshakeTimeout,
-	}
-	// HTTP/2 via ALPN is the net/http default for HTTPS; for HTTP/1.1 we
-	// disable HTTP/2 explicitly. Go's transport doesn't expose a clean
-	// "h1 only" flag; setting ForceAttemptHTTP2=false plus TLSNextProto
-	// to an empty map prevents ALPN h2 negotiation. Functionally
-	// equivalent to reqwest's `http1_only()` for HTTPS dispatch.
-	if cfg.HTTPVersion == HTTPVersion1 {
-		transport.ForceAttemptHTTP2 = false
-		transport.TLSNextProto = map[string]func(authority string, c *tls.Conn) http.RoundTripper{}
-	} else {
-		transport.ForceAttemptHTTP2 = true
-		// Go-only divergence from Rust: enable StrictMaxConcurrentStreams
-		// so the HTTP/2 client *waits* when ALB advertises a per-connection
-		// stream limit (typically ~128) instead of cheerfully opening
-		// extra streams and getting back REFUSED_STREAM / GOAWAY. Rust's
-		// reqwest doesn't expose this knob today, so Go is strictly safer
-		// against the AWS-ALB H2→H1 translation cap. Documented in
-		// HANDOFF.md §5 as an intentional drop-in divergence.
-		if h2, err := http2.ConfigureTransports(transport); err == nil && h2 != nil {
-			h2.StrictMaxConcurrentStreams = true
+	sizing := cfg.HostPoolSizing
+	if sizing.MaxSlotsPerHost == 0 {
+		if cfg.HTTPVersion == HTTPVersion1 {
+			sizing = HTTP1HostPoolSizing()
+		} else {
+			sizing = DefaultHostPoolSizing()
 		}
+		cfg.HostPoolSizing = sizing
 	}
-	// Wrap with the per-host limiter so multi-pool fanout to one host
-	// can't blow past MaxConcurrentPerHost. Zero disables → returns the
-	// inner transport unchanged.
-	rt := newHostLimiter(transport, cfg.MaxConcurrentPerHost)
-	return &HTTPMediator{
-		client: &http.Client{Transport: rt, Timeout: cfg.Timeout},
-		cfg:    cfg,
+	builder := newClientBuilder(cfg)
+	pools := NewHostPoolRegistry(sizing, builder)
+	pools.StartSweep()
+	return &HTTPMediator{pools: pools, cfg: cfg}
+}
+
+// Close stops the host-pool sweep goroutine. Safe to call multiple
+// times. Calls to Mediate after Close are still permitted but the pool
+// will no longer shrink in the background.
+func (m *HTTPMediator) Close() {
+	if m.pools != nil {
+		m.pools.Close()
+	}
+}
+
+// HostPools is exposed for tests/metrics. Production code should not
+// poke at the registry directly.
+func (m *HTTPMediator) HostPools() *HostPoolRegistry { return m.pools }
+
+// newClientBuilder returns a ClientBuilder that mints a fresh
+// *http.Client with its own *http.Transport per call. Each Transport
+// owns its own connection pool, so two slots backed by separate
+// Transports give us two independent h2 connections to the origin.
+func newClientBuilder(cfg MediatorConfig) ClientBuilder {
+	return func() *http.Client {
+		dialer := &net.Dialer{
+			Timeout:   cfg.ConnectTimeout,
+			KeepAlive: 30 * time.Second,
+		}
+		transport := &http.Transport{
+			DialContext:         dialer.DialContext,
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     90 * time.Second,
+			TLSHandshakeTimeout: cfg.TLSHandshakeTimeout,
+		}
+		if cfg.HTTPVersion == HTTPVersion1 {
+			transport.ForceAttemptHTTP2 = false
+			transport.TLSNextProto = map[string]func(authority string, c *tls.Conn) http.RoundTripper{}
+		} else {
+			transport.ForceAttemptHTTP2 = true
+			if h2, err := http2.ConfigureTransports(transport); err == nil && h2 != nil {
+				h2.StrictMaxConcurrentStreams = true
+			}
+		}
+		return &http.Client{Transport: transport, Timeout: cfg.Timeout}
 	}
 }
 
@@ -243,7 +253,14 @@ func (m *HTTPMediator) mediateOnce(ctx context.Context, msg *common.Message) com
 		req.Header.Set("Authorization", "Bearer "+*msg.AuthToken)
 	}
 
-	resp, err := m.client.Do(req)
+	host, err := HostKeyFromURL(msg.MediationTarget)
+	if err != nil {
+		return common.ErrorConfig(0, fmt.Sprintf("invalid mediation target URL: %v", err))
+	}
+	guard := m.pools.Acquire(host)
+	defer guard.Release()
+
+	resp, err := guard.Client().Do(req)
 	if err != nil {
 		// Map common error types.
 		var netErr interface{ Timeout() bool }
