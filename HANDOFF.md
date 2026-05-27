@@ -6,104 +6,293 @@ for the Rust → Go port. Read it cold to pick up the work.
 ## 0. Session orientation (read this first)
 
 **Where to start cold:**
-- Repo is initialised on `main` tracking `git@github.com:flowcatalyst/flowcatalyst-go.git`.
-  Last 10 commits show the trajectory; `git log --oneline` for the full list.
-- Drop-in port is functional end-to-end on a fresh embedded Postgres:
-  events ingest → fanout produces dispatch jobs → scheduler claims them →
-  mediator dispatches with HMAC signing → frontend serves at `/`.
 - `make build` builds frontend (`pnpm install --frozen-lockfile && pnpm build`)
-  then every Go binary. `make go-build` skips the frontend step. Fresh
-  checkout requires Node + pnpm to be present for `make build`.
-- Tests: `make test-unit` runs all unit tests (DB-free, fast).
+  then every Go binary. `make go-build` skips the frontend step.
+- `make test-unit` runs all unit tests (DB-free, fast).
   `make test-integration` runs the testcontainers Postgres suite.
+- `make api-diff` checks the committed `api/openapi.lock.json` against the
+  live huma-generated spec; part of `make ci`.
+- `go run ./cmd/fc-dev start --embedded-db-reset` boots an embedded PG +
+  applies migrations + runs seeds + serves the platform API on :3000.
+- `go run ./cmd/fc-dev init` (after start, with PG running) bootstraps
+  admin user + internal IDP + default Client + Application + Service
+  Account + OAuth client + writes `.env`.
 
-**Last-session deltas (commits 7a32a88 → 03fc690):**
+**Drop-in port status:** functional end-to-end on fresh embedded Postgres
+(events ingest → fanout → dispatch jobs → scheduler claims → mediator
+dispatches with HMAC signing → frontend serves at `/`). The wire-format
+parity claim vs Rust is **not yet empirically verified** — that's the
+remaining gate before cutover. See §6.
 
-| Commit  | What                                                                         |
-|---------|------------------------------------------------------------------------------|
-| 7a32a88 | Parity harness framework — `tools/parityharness/` + 6 starter YAMLs          |
-| efb8052 | HTTP mediator: wire `ConnectTimeout` into Transport.DialContext              |
-| ebbda58 | HTTP mediator: enable HTTP/2 `StrictMaxConcurrentStreams`                    |
-| 49dd5a9 | HTTP mediator: per-host concurrency cap via `hostLimiter` RoundTripper       |
-| d886091 | Router HTTP routes — 17 health/monitoring/warnings/config endpoints          |
-| fc71e53 | Vue frontend ported + embedded via `//go:embed` (gitignored `dist/`)         |
-| 0e678f8 | OpenAPI 3.0 spec framework + spec for 3 aggregates (eventtype/principal/sub) |
-| 0ea8bcd | BFF filter-options (clients + event-type applications)                       |
-| 03fc690 | BFF event-types (9 of 13 routes)                                             |
+### Recently landed (sealed-Result simplification + huma OpenAPI)
 
-**Pending work, ordered by recommended priority:**
+A 12-task architectural refactor completed in 2026-05:
+- **Goose** replaces the hand-rolled migration runner; transparent
+  `_fc_migrations` → `goose_db_version` bootstrap.
+- **Sealed `pkg/fcsdk/commit`** package replaces the
+  `usecase.Result[E]` / `UseCase[Cmd,Evt]` machinery. Use cases are now
+  plain functions `func VerbAggregate(ctx, repo, uow, cmd, ec) (commit.Committed[E], error)`.
+  Old machinery retained only for the consumer-app SDK
+  (`pkg/fcsdk/usecase/*`). Compile-time seal preserved via unexported
+  `event` field on `Committed[E]`.
+- **Huma** (`danielgtaylor/huma/v2`) replaces kin-openapi. All 20
+  aggregates registered via `huma.Register(api, op, handler)`; spec
+  derived from the Input/Output struct types. Wire DTOs split into
+  `<aggregate>/api/dto.go` separate from `operations.Command`.
+- **`api/openapi.lock.json`** committed baseline; `make api-bump` /
+  `make api-diff` enforce wire-format change discipline. CI fails on
+  unintentional drift.
+- **`internal/platform/shared/jsontime.Time`** + `httpcompat.Time` —
+  fixed-precision microsecond ISO-8601 for all API response timestamps.
+- **`internal/platform/shared/httpcompat`** — huma error transformer
+  that emits the canonical `{code, message, details}` envelope with the
+  right HTTP status mapped from `*usecase.Error.Kind`.
+- **`pkg/fcsdk/commit` worked example:**
+  `internal/platform/eventtype/{operations,api}/*.go` (also cors, role,
+  every other aggregate — all follow the same shape).
+- See CONVENTIONS.md §1 / §3 / §4 / §5a for the current patterns.
 
-1. **Roles BFF (6 routes)** — `internal/platform/shared/bff/roles.go`.
-   Same pattern as event_types.go just landed. Unblocks the roles page in
-   the embedded frontend. Smallest next thread.
-2. **Processes + scheduled-jobs BFF via mount-twice refactor (13 routes)**
-   — Rust mounts the canonical `processes_router` under both `/api/*`
-   and `/bff/*`. Go needs `RegisterRoutes` to accept a configurable
-   prefix; once that lands, both BFF surfaces are free. Same applies to
-   scheduled-jobs.
-3. **Event-types BFF: the missing 4** — needs ArchiveUseCase,
-   FinaliseSchemaUseCase, DeprecateSchemaUseCase, plus wiring
-   SyncEventTypesUseCase through state.
-4. **OpenAPI sweep — remaining ~17 aggregates** —
-   `internal/platform/shared/openapi/` framework is in. Each aggregate
-   adds an `OpenAPI(doc)` function alongside `RegisterRoutes`. Pattern:
-   see eventtype/api/openapi.go (~70 LoC each). Once 4-6 more land, wire
-   the `parity-spec` CI job (currently a stub) to run oasdiff against
-   the Rust spec for real.
-5. **Developer BFF (8 routes)** — `/bff/developer/applications/*` for
-   the Developer Portal. Lower priority — only one page calls these.
-6. **HTTP slot-pool port** — the Rust side is designing a per-host
-   `HostConnectionPool` with up to 8 H2 connection slots × ~100 streams.
-   Once Rust lands, port to Go so drop-in parity holds (the current
-   Go `hostLimiter` becomes the laggard). Design notes in task #20 and
-   in `internal/router/host_limiter.go`'s doc.
-7. **Manager surface for Lifecycle hooks** — Go `router.Manager` doesn't
-   yet expose `PoolStats()`, `CheckMemoryHealth()`, `ReapStaleEntries()`,
-   `consumer_ids()`. Once added, the LifecycleManager's deferred tasks
-   (memory health monitor, consumer auto-restart, reaper) can land. See
-   `internal/router/lifecycle.go` for the placeholders.
-8. **Fanout subscription cache race window** —
-   `internal/stream/fan_out.go` caches active subscriptions for 5s. A
-   subscription created and a matching event published in the same
-   5-second window can be claimed by the no-subs fast path before the
-   cache refreshes. Mitigation: drop the TTL or refresh-on-every-cycle.
-9. **Structured logging tidy** — Go calls `slog.Warn(...)` inline with
-   ad-hoc keys; TS uses `this.logger.warn({...}, "msg")` consistently.
-   Sweep + normalise per-subsystem skeletons. Low-stakes quality-of-life.
-10. **Pre-existing 22a/22b** — `cmd/fc-mcp-server` + `pkg/fcsdk/sync` SDK
-    consumer-side compile-time issues were fixed earlier; verify by
-    running `go build ./...` which now succeeds cleanly.
+### Outstanding port work (read this before picking up the next task)
 
-**Patterns established in last session — apply for new work:**
+**Production-blocking (P0)** — empirical drop-in verification (§6):
+no one has yet (a) brought up Rust against a fresh PG, (b) stopped Rust
+and brought up Go against the same PG, (c) run the parity harness +
+frontend + a real SDK consumer end-to-end. The infrastructure is in
+place (`tools/parityharness/`, 14 YAML cases). The procedure is the
+last gate before cutover.
 
-- **HTTP route packages:** mirror `internal/router/api/` —
-  `RegisterRoutes(r chi.Router, deps Deps)` with deps held by reference
-  so future endpoints can grow without re-threading callers.
-- **OpenAPI spec:** every api package pairs `RegisterRoutes` with an
-  `OpenAPI(doc *openapi.Doc)` function. Recommended pattern for new
-  packages: fused `Mount(r chi.Router, doc *openapi.Doc, state *State)`
-  so route + spec can't drift. Today the two functions are paired by
-  convention — bring forward when fused helper lands.
-- **BFF endpoints:** wire DTOs separate from internal types. Match
-  Rust's per-endpoint JSON-case decisions (snake_case where Rust uses
-  default serde; camelCase where Rust has explicit renames). See
-  `internal/platform/shared/bff/event_types.go` + `dto.go`-style files
-  for the pattern.
-- **Parity-harness YAML:** every new endpoint that's wire-stable should
-  get a `tests/parity/requests/<area>/<name>.yaml` so the harness can
-  catch drift once a Rust+Go pair is running side by side.
-- **Smoke testing:** boot `fc-dev`, curl with `X-FC-Test-*` headers
-  (anchor scope = bypass all permission checks), verify status + JSON
-  shape. The harness verifies the shape automatically once the YAML
-  exists.
+**Parity surface gaps (P1)**
+1. **BFF routes** for the embedded frontend. Done: dashboard stats,
+   filter-options, event-types (9 of 13). Pending: roles BFF (6),
+   processes BFF (7, needs mount-twice refactor), scheduled-jobs BFF
+   (6), developer BFF (8), event-types lifecycle 4 (archive,
+   finalise-schema, deprecate-schema, sync-platform — each needs a use
+   case).
+2. **Per-row sync events** — `eventtype/operations/sync.go` emits only
+   the rollup; Rust emits per-row Created/Updated/Deleted. Same gap
+   for role, dispatch_pool, subscription, scheduled_job, process,
+   platformconfig.
+3. **Specialty routes** — connection activate/pause, dispatch-pool
+   suspend (new use cases needed).
+4. **Principal find-methods** — Go has 3, Rust has 14+
+   (`find_by_service_account`, `find_users`, `find_with_filters`, etc.)
+   Needed when filtered `/api/principals` endpoints + OIDC bridge
+   auto-provisioning land.
 
-**Files not authored by Claude but present uncommitted at session end:**
+**Subsystem gaps**
+5. **Router** — Prometheus metrics + HdrHistogram; full
+   `/monitoring/*` / `/warnings/*` / `/config/*` HTTP surface
+   (~40 routes); TrafficStrategy for ALB integration. Manager surface
+   for `check_memory_health`/`restart_consumer`/`get_pool_stats`/
+   `reap_stale_entries`/`pool_codes`/`consumer_ids` — blocks
+   deferred LifecycleManager tasks.
+6. **Outbox** — MySQL/Mongo backends, GlobalBuffer with
+   BufferFullError, RecoveryTask for stuck PROCESSING items,
+   Prometheus `/metrics`.
+7. **Stream** — StreamHealthService with per-projection snapshots,
+   `StreamProcessorHandle.Stop()` graceful shutdown, `/ready` endpoint.
+8. **Scheduler** — `PausedConnectionCache.spawn_refresh_task`,
+   separate `BlockOnErrorChecker` component.
 
-- `CONVENTIONS.md` — appears to be a separate authored doc on patterns.
-  Inspect + commit separately.
-- Doc-comment expansions in `internal/router/lifecycle.go` and
-  `internal/router/pool.go` — left untouched in case they're work-
-  in-progress edits.
+**Background workers + glue**
+9. **WebAuthn ceremony purger** — `PurgeExpired` exists but nothing
+   calls it on a loop. Rust runs it as a background task.
+10. **OIDC bridge auto-provisioning** — Go fails with
+    `USER_NOT_PROVISIONED` for unknown emails; Rust auto-creates via
+    the anchor-domain row.
+11. **WebAuthn enumeration defence** — Rust returns deterministic-fake
+    `allowCredentials` for unknown emails; Go returns empty.
+12. **Fanout subscription cache race** — 5s TTL race window between
+    create + first event. Mitigation: drop TTL or refresh-per-cycle.
+
+**Infrastructure**
+13. **AWS Secrets Manager** for DB credentials rotation (`DB_SECRET_ARN`) —
+    Rust supports it; Go has a TODO in `envcfg.go::ResolveDatabaseURL`.
+14. **ALB target-group registration** on leader transition (Rust
+    feature-gated; not ported).
+15. **HTTP slot-pool port** — DONE per `internal/router/host_pool.go`.
+
+**Quality / quality-of-life**
+16. **Structured logging tidy** — Go uses inline `slog.Warn(...)` with
+    ad-hoc keys vs TS's consistent `this.logger.warn({...}, "msg")`
+    shape. Sweep + normalise.
+17. **Flaky TSID test** — `TestUniquenessSerial`/`Parallel`
+    intermittently fail with `duplicate TSID generated` at high
+    throughput. Lower sample count or add sub-ms counter.
+
+**Just-introduced from the huma migration**
+18. **WebAuthn session cookie** (`webauthn/api/api.go`) — `SessionWriter`
+    can't reach `http.ResponseWriter` from inside a huma handler.
+    Currently unwired. Needs huma adapter or move to OIDC bridge.
+19. **`emaildomainmapping /lookup` negative case** — now `200 + {found:false}`,
+    was `404 + {found:false}`. Restore the 404 if byte-identical parity
+    is required.
+
+**Suggested next moves** (priority):
+1. **Drop-in verification (P0)** — run §6 procedure. The proof.
+2. **BFF routes (P1.1)** — unblocks the embedded frontend.
+3. **Per-row sync events (P1.2)** — visible regression for SDK consumers
+   relying on per-row events.
+4. **Subsystem gaps** — needed for prod observability + graceful shutdown.
+
+## Historical refactor notes (sealed-Result + huma OpenAPI — completed)
+
+The following is historical context for the 12-task refactor that landed
+in 2026-05. The summary in §0 above is the canonical "what landed"
+description; keep reading only if you need the per-step detail.
+
+## Active refactor — sealed-Result simplification + huma OpenAPI
+
+A 12-task plan is in flight to (a) move every use case from the
+`UseCase[Cmd,Evt]` interface + `usecase.Result[E]` machinery onto plain
+functions returning `(commit.Committed[E], error)`, and (b) replace the
+hand-rolled kin-openapi spec builder with `danielgtaylor/huma/v2` once
+the use case layer is leaner. The seal moves to a new package
+`pkg/fcsdk/commit` with an unexported `event` field on `Committed[E]`
+that external code cannot populate — the protection is preserved, the
+ceremony drops by ~70%.
+
+### Done so far (foundations + full use case sweep + huma eventtype pilot)
+
+- **Goose migrations.** `internal/migrate/migrate.go` rewritten to
+  delegate to `pressly/goose/v3`. All 29 SQL files prefixed with
+  `-- +goose Up`. Forward-only. Bootstrap seeds `goose_db_version`
+  from any pre-existing `_fc_migrations` and drops the legacy table.
+  Top-level `/migrations/` deleted; `internal/migrate/sql/` is the
+  single canonical source.
+- **`internal/platform/shared/jsontime`.** Time wrapper that always
+  marshals as fixed-6-digit microsecond ISO-8601 (`2026-05-26T12:00:00.123456Z`).
+  Used by the upcoming huma response DTOs. Does NOT touch the HMAC
+  signing path in `internal/router/mediator.go` (still milliseconds).
+- **`pkg/fcsdk/commit` package.** `Committed[E]` sealed struct +
+  `Save` / `Delete` / `SaveAll` / `Emit`, each delegating to the
+  existing `usecasepgx.Commit*` family for the transaction machinery
+  and re-shaping the return type. Compile-time seal verified by
+  attempting external construction (`commit.Committed[int]{event: 42}`
+  is rejected with `cannot refer to unexported field event`).
+- **Use case migration: ALL 16 aggregates done.** Each dropped its
+  `*XxxUseCase` structs, `NewXxxUseCase` constructors, three-method
+  interface, and `var _ usecase.UseCase[...]` assertions. Each now
+  exposes plain functions `func VerbAggregate(ctx, repo, uow, cmd, ec)
+  (commit.Committed[E], error)` with the validate/authorize/business
+  logic inlined. The api package's `State` struct collapsed to
+  `{Repo, UoW *usecasepgx.UnitOfWork}` (plus any extra repos needed
+  for cross-aggregate validation, e.g. principal/api/api.go).
+- **Old `usecase.Result/Run/UseCase` surface** — kept (not deleted).
+  Zero platform-internal code references it; only `pkg/fcsdk/*`
+  (consumer-app SDK) still uses it, and the new `commit` package
+  delegates to `usecasepgx.Commit*` internally. CONVENTIONS.md §3
+  has been rewritten with the new worked example.
+- **Huma foundation landed.** `danielgtaylor/huma/v2` installed.
+  `internal/platform/shared/httpcompat` exposes:
+  - `httpcompat.Init()` — installs the huma error transformer that
+    maps `*usecase.Error` → the canonical `{code, message, details}`
+    envelope with the right HTTP status (called once in WirePlatform).
+  - `httpcompat.ErrorModel` — wire shape; implements `huma.StatusError`.
+  - `httpcompat.Time` — alias for `jsontime.Time` (microsecond ISO-8601).
+- **Eventtype huma pilot landed.** `internal/platform/eventtype/api/`:
+  - `dto.go` — wire DTOs (`CreateEventTypeRequest`, `EventTypeResponse`,
+    etc.) with explicit `toCommand()` / `fromEntity()` mappers; uses
+    `httpcompat.Time` for timestamp fields.
+  - `api.go` — fully huma-based, `Register(api huma.API, *State)`,
+    seven operations registered (list / create / get-by-id /
+    get-by-code / update / delete / add-schema).
+  - `openapi.go` — DELETED (kin-openapi spec); huma derives the spec
+    from the Input/Output struct types.
+  - `WirePlatform` creates a `humachi.New(r, ...)` API once and threads
+    it into the eventtype `Register` call.
+- **Lockfile + spec gate.**
+  - `api/openapi.lock.json` — committed baseline of the live spec
+    (currently only eventtype's 7 endpoints; grows per huma migration).
+  - `tools/dump-spec/main.go` — emits the live spec to stdout without
+    touching the DB (registers routes against nil-dep `*State` values;
+    the spec generator only inspects Input/Output types).
+  - `make dump-spec` / `make api-bump` / `make api-diff` Makefile
+    targets; `make ci` now runs `api-diff` as part of the CI sweep.
+  - `tools/dump-spec/dump_spec_test.go` — `TestOpenAPISpecLocked`
+    snapshot test that fails if the live spec drifts from the lockfile.
+- **CONVENTIONS.md updated.** §3 rewritten for `commit.Committed[E]` /
+  the plain-function use case shape. §4 (handler pattern) updated to
+  show the huma `func(ctx, *Input) (*Output, error)` shape calling
+  use case functions directly. §5a documents the spec lockfile + CI
+  gate workflow.
+
+### Remaining
+
+The 12-task refactor is **complete**. All 20 platform aggregates are
+huma-registered, all `<aggregate>/api/openapi.go` files are gone,
+`internal/platform/shared/openapi/` (kin-openapi framework) is gone,
+`getkin/kin-openapi` removed from `go.mod`. `WirePlatform` configures
+huma to serve `/api/openapi.json`, `/api/openapi.yaml`, and
+`/api/docs` (Swagger UI). The committed `api/openapi.lock.json`
+covers every endpoint; `make api-diff` is part of `make ci`.
+
+Two known follow-ups noted during the migration:
+
+- `internal/platform/webauthn/api/api.go` — the legacy
+  `SessionWriter` cookie-write callback can't reach
+  `http.ResponseWriter` from inside a huma handler. The field stays
+  on `State` but the cookie path is unwired; `authenticateComplete`
+  returns `{principalId: ...}` JSON only. Either add a huma adapter
+  that observes the response, or move the cookie write into the
+  chi-side OIDC bridge package. Marked with a TODO in the handler.
+- `internal/platform/emaildomainmapping/api/api.go` — the `/lookup`
+  route's negative case now returns `200 + {found: false}` instead
+  of the previous `404 + {found: false}` body. If byte-identical 404
+  is required for parity, swap that branch back to
+  `httperror.NotFound(...)`.
+
+### Patterns for picking up Task 11
+
+Worked example: `internal/platform/eventtype/api/`. The shape:
+
+```go
+// dto.go
+type CreateXxxRequest struct {
+    Field string `json:"field" doc:"..."`
+}
+func (r CreateXxxRequest) toCommand() operations.CreateCommand { ... }
+
+type XxxResponse struct {
+    ID        string          `json:"id"`
+    CreatedAt httpcompat.Time `json:"createdAt"`
+    // ... wire-shaped fields with explicit JSON tags ...
+}
+func fromEntity(e *xxx.Xxx) XxxResponse { ... }
+
+// api.go
+type State struct { Repo *xxx.Repository; UoW *usecasepgx.UnitOfWork }
+const tag = "xxxes"
+
+func Register(api huma.API, s *State) {
+    huma.Register(api, huma.Operation{
+        OperationID: "createXxx",
+        Method: http.MethodPost,
+        Path: "/api/xxxes",
+        Tags: []string{tag},
+        DefaultStatus: http.StatusCreated,
+    }, s.create)
+    // ... etc ...
+}
+
+type createInput struct { Body CreateXxxRequest }
+type createOutput struct { Body apicommon.CreatedResponse }
+
+func (s *State) create(ctx context.Context, in *createInput) (*createOutput, error) {
+    ac := auth.FromContext(ctx)
+    if err := auth.CanWriteXxx(ac); err != nil { return nil, err }
+    ec := usecase.NewExecutionContext(ac.PrincipalID)
+    committed, err := operations.CreateXxx(ctx, s.Repo, s.UoW, in.Body.toCommand(), ec)
+    if err != nil { return nil, err }
+    return &createOutput{Body: apicommon.CreatedResponse{ID: committed.Event().XxxID}}, nil
+}
+```
+
+### Build status
+
+`go build ./...` clean. `go test -race -short ./...` green
+(including `TestOpenAPISpecLocked` snapshot of the current
+eventtype-only spec).
 
 ---
 
@@ -112,9 +301,11 @@ for the Rust → Go port. Read it cold to pick up the work.
 The Go port is a **drop-in replacement** for the Rust binaries. That means:
 
 1. **Same Postgres database.** No new tables, no schema changes. The
-   29 migrations in `/migrations/` are the Rust source's own — copied
-   verbatim and embedded into every Go binary via `internal/migrate/`.
-   Either build can apply them.
+   29 migrations under `internal/migrate/sql/` are the Rust source's
+   own — copied verbatim and embedded into every Go binary via
+   `internal/migrate/`. Either build can apply them. Runner is
+   `pressly/goose/v3`; legacy `_fc_migrations` databases upgrade
+   transparently to `goose_db_version`.
 
 2. **Byte-identical HTTP APIs.** Every existing SDK consumer + the Vue
    frontend MUST continue working with zero source changes after cutover.
@@ -160,7 +351,7 @@ cmd/
 
 internal/
   server/             — shared wiring (EnvCfg, WirePlatform, subsystem launchers)
-  migrate/            — embed-FS migration runner (applies /migrations/*.sql)
+  migrate/            — goose v3 migration runner (applies sql/*.sql)
   platform/           — every subdomain (20+ aggregates with operations/api/)
     auth/             — fosite-backed OAuth provider + OIDC bridge
     seed/             — 12 roles + 41 event types + 41 schemas
@@ -604,22 +795,21 @@ Specifically:
   in `NewHTTPMediator` (production HTTP/2 path only; HTTP/1.1 dev
   path unaffected).
 
-- **Intentional Go-only divergence: per-host concurrency cap.**
-  `internal/router/host_limiter.go` wraps the `http.Transport` with a
-  per-target-host semaphore. Default cap: 100 (prod), 50 (dev). Caps
-  in-flight requests to any single host regardless of which dispatch
-  pool issued them. Sits ABOVE the transport so the cap is on logical
-  requests, not TCP connections — covers both H1 (multiple TCP
-  connections) and H2 (multiplexed streams on one connection)
-  uniformly. Defence-in-depth for the AWS-ALB case: even if a peer
-  doesn't advertise an H2 stream limit (so `StrictMaxConcurrentStreams`
-  has nothing to honour), the host limiter still bounds fanout.
-  Cancellation while queued returns promptly without dispatching the
-  request — verified by `TestHostLimiter_ContextCancelReleasesQueued`.
-  Also covers the cross-pool case: if two dispatch pools target the
-  same host, they share the per-host budget rather than each running
-  their pool's `Concurrency` independently. Set
-  `MediatorConfig.MaxConcurrentPerHost = 0` to disable.
+- **Per-host HTTP/2 connection pool (Rust parity).**
+  `internal/router/host_pool.go` ports
+  `crates/fc-router/src/http_pool.rs`. Each origin (scheme+host+port)
+  gets a `HostConnectionPool` holding one or more `ClientSlot`s; each
+  slot owns a dedicated `*http.Client` whose `*http.Transport` keeps
+  its own connection pool. Under HTTP/2 that means one h2 connection
+  per slot, so growing slots raises the effective concurrent-stream
+  cap past what a single connection can multiplex. Defaults match
+  Rust `HostPoolSizing::default()` (high-watermark=100, low=20,
+  max-slots=8, slot-idle-grace=60s, sweep=15s). Replaces the older
+  `host_limiter` semaphore (commit 49dd5a9) — the pool grows
+  capacity on demand instead of just throttling, which matches what
+  Rust does and removes the cross-pool dispatch ceiling the limiter
+  imposed. Sweep goroutine started by `NewHTTPMediator`; stop it
+  with `HTTPMediator.Close()`.
 
 - **Intentional Go-only knob: explicit `TLSHandshakeTimeout`.** Go's
   stdlib default is 10s but we set it explicitly via
@@ -666,43 +856,94 @@ Specifically:
   unit-level. A `docker-compose.test.yml` with PG + a parity harness
   would catch the byte-identical-API requirement automatically.
 
-## 6. How to Verify Drop-in (proposed)
+## 6. How to Verify Drop-in (the P0 gate)
 
-The drop-in claim is unverified until we actually run both binaries
-against the same DB and confirm identical behaviour. Recommended steps:
+The drop-in claim is **functional** (Go boots, applies migrations,
+serves requests, fanout produces jobs, scheduler dispatches) but
+**not yet empirically verified for wire-format parity vs Rust**.
+This is the last gate before cutover.
 
-1. **Run Rust binary against a fresh PG.** Apply migrations. Run
-   the standard frontend smoke test. Confirm it works.
+### What's in place
 
-2. **Stop Rust. Start Go fc-server against the SAME PG.** Run the
-   identical smoke test. Confirm identical responses.
+- **`tools/parityharness/`** — a working binary that hits two URLs
+  with the same YAML-described request and diffs status + headers +
+  body shape. Placeholders (`tsid`, `uuid`, `iso8601-microsecond`,
+  `any-string`, `any-object`, etc.) handle inherently-different
+  values (IDs, timestamps). Missing env vars cause clean SKIPs.
+- **14 YAML cases** under `tests/parity/requests/{smoke,event-types,
+  dispatch-jobs,principals,bff,router,openapi}/`. Coverage is
+  partial — the full API surface is ~200 routes; this is the smoke
+  set. **Grow as confidence demands.**
+- **`api/openapi.lock.json`** — the committed Go spec. Once Rust
+  emits its own spec, the cleanest forward-looking parity check is
+  `oasdiff breaking <rust.json> api/openapi.lock.json` in CI.
 
-3. ~~**Run a contract harness**~~ **Done (framework).**
-   `tools/parityharness/` is a working binary. Usage:
-   `go run ./tools/parityharness -rust=URL -go=URL -dir=tests/parity/requests`.
-   YAML cases under `tests/parity/requests/` describe `name + request +
-   expect (status, body_shape)`. `${VAR}` substitution in path/body/
-   headers; missing vars cause clean SKIPs. Comparator does status +
-   load-bearing-header diffs + placeholder-typed JSON shape matches
-   (`tsid`, `uuid`, `iso8601-microsecond`, `any-*`). 15 unit tests on
-   the comparator + placeholder matchers. Self-tested against fc-dev
-   pointed at itself (both `-rust` and `-go` → same URL) — 2 PASS, 5
-   SKIP (no `ANCHOR_TOKEN` env), exit 0; divergence path proved by
-   pointing `-go` at a closed port (exit 1, attributed correctly).
-   First self-test immediately caught 2 inaccurate YAML expectations
-   (status 401 vs actual 403; error envelope `error/error_description`
-   vs actual `code/message`) — exactly the kind of contract drift the
-   harness exists to catch. Next: 6 starter YAMLs under smoke/,
-   event-types/, dispatch-jobs/, principals/ — grow as new endpoints
-   land.
+### Procedure (executable by hand; CI variant noted)
 
-4. **Frontend smoke** — copy the Vue app, set `VITE_API_BASE_URL` to
-   the Go server, click through the main screens (clients, users,
-   applications, event types, dispatch jobs).
+1. **Bring up Rust** against a fresh PG. Apply Rust's migrations.
+   Run init (or its Rust equivalent). Note the URL — call it
+   `RUST_URL=http://localhost:3000`.
 
-5. **SDK consumer smoke** — point one of your real consumer apps at
+2. **Bring up Go** against a SECOND fresh PG (or the same one — both
+   migration sets are idempotent, but a fresh PG eliminates one
+   variable). Run `go run ./cmd/fc-dev start --embedded-db-reset`.
+   Note the URL — call it `GO_URL=http://localhost:3001`.
+
+3. **Authenticate.** Both binaries need an admin to be useful past
+   the unauthenticated endpoints. Run `fc-dev init` (Go) and the
+   Rust equivalent against their respective DBs. Mint an admin token
+   on each via `POST /oauth/token` with the seeded credentials.
+   Export the token: `export ANCHOR_TOKEN=...` — the parity harness
+   substitutes this into YAML cases that need it.
+
+4. **Run the parity harness:**
+
+   ```bash
+   go run ./tools/parityharness \
+       -rust=$RUST_URL \
+       -go=$GO_URL \
+       -dir=tests/parity/requests
+   ```
+
+   Expected outcomes: PASS for cases that match exactly, FAIL with a
+   diff for cases that differ, SKIP for cases whose required env
+   vars aren't set. Exit 0 if no FAIL; exit 1 otherwise.
+
+5. **Investigate any FAIL.** Common shapes of failure:
+   - Wire-format drift (a field name differs) → fix the Go side
+   - Status-code drift → fix the Go side
+   - Header drift (X-FC-* family) → fix the Go side
+   - Placeholder mismatch (e.g. timestamp format) → fix the YAML
+     or the Go side, whichever is canonical for that field
+
+6. **Frontend smoke** — set `VITE_API_BASE_URL=$GO_URL`, build the
+   Vue app, click through the main screens (clients, users,
+   applications, event types, dispatch jobs). Anything that breaks
+   becomes a parity harness YAML case + a Go fix.
+
+7. **SDK consumer smoke** — point one of your real consumer apps at
    the Go server (change `FLOWCATALYST_URL`). Watch for outbox
    delivery, event ingestion, dispatch retries.
+
+### CI variant
+
+Once Rust binaries are published in a way GitHub Actions can pull
+them down, add a `parity-spec` CI job that does steps 1-4 in a
+matrix. Until then, the harness runs locally as part of the cutover
+checklist; the `api/openapi.lock.json` snapshot test catches Go-side
+drift in every PR (already wired into `make ci`).
+
+### Known parity gaps (intentional or unresolved)
+
+- **Existing JWT/token compatibility is NOT required** (§1 #6) —
+  users + service accounts re-auth post-cutover. Don't test this.
+- **WebAuthn session cookie** (`webauthn/api/api.go`) — currently
+  unwired post-huma migration. Affects passkey flows.
+- **`emaildomainmapping /lookup` negative case** — `200 + {found:false}`
+  vs Rust's `404 + {found:false}`. Restore the 404 if needed.
+- **Per-row sync events** — Go emits the rollup only; Rust emits
+  per-row Created/Updated/Deleted alongside. SDK consumers that
+  subscribe to per-row events will see fewer events from Go.
 
 ## 7. Suggested Sequence for the Next Session
 
