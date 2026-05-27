@@ -281,6 +281,11 @@ func WirePlatform(r chi.Router, pool *pgxpool.Pool, cfg EnvCfg) error {
 			Repo: eventTypeRepo,
 			UoW:  uow,
 		})
+		bff.RegisterRoles(r, &bff.RolesState{
+			Roles:        roleRepo,
+			Applications: applicationRepo,
+			UoW:          uow,
+		})
 		sdkapi.RegisterRoutes(r, &sdkapi.DispatchJobsBatchState{Repo: dispatchJobRepo})
 	})
 

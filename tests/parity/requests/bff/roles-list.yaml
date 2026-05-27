@@ -1,0 +1,16 @@
+name: "GET /bff/roles — roles list with totals"
+
+# Powers RoleListPage and the user/SA role dropdowns. Returns the
+# seeded platform roles on a fresh boot (12 by default).
+
+request:
+  method: GET
+  path: /bff/roles
+  headers:
+    Authorization: "Bearer ${ANCHOR_TOKEN}"
+
+expect:
+  status: 200
+  body_shape:
+    items: any-array
+    total: any-number

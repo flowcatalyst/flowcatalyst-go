@@ -1,0 +1,16 @@
+name: "GET /bff/roles/permissions — built-in permission catalog"
+
+# Static catalog of the permission strings the platform recognises.
+# Drives the "edit role permissions" picker on RoleEditPage.
+
+request:
+  method: GET
+  path: /bff/roles/permissions
+  headers:
+    Authorization: "Bearer ${ANCHOR_TOKEN}"
+
+expect:
+  status: 200
+  body_shape:
+    items: any-array
+    total: any-number
