@@ -113,11 +113,11 @@ last gate before cutover.
     Principal via `principalops.CreateUser` with the mapping's scope
     + primary-client-id, and proceeds. Role-mapping from IDP claims
     (Rust's `sync_oidc_login_with_allowed_roles`) is still pending.
-    **CAVEAT:** `bridge.LoginEndpoint` is constructed by
-    `NewLoginEndpoint` but **not wired into `WirePlatform`** — the
-    handlers `POST /oauth/check-domain`, `GET /oauth/oidc/login`, and
-    `GET /oauth/oidc/callback` aren't served today. Auto-provisioning
-    works once the bridge is wired (separate item).
+    **Bridge wired:** `POST /oauth/check-domain`, `GET /oauth/oidc/login`,
+    and `GET /oauth/oidc/callback` now serve from `WirePlatform`
+    alongside the OAuth provider endpoints. `SessionWriter` is left at
+    its JSON-200 fallback; the frontend will swap it for the
+    session-cookie write at startup.
 11. **WebAuthn enumeration defence** — Rust returns deterministic-fake
     `allowCredentials` for unknown emails; Go returns empty.
 12. **Fanout subscription cache race** — 5s TTL race window between

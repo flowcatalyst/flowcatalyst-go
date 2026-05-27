@@ -15,6 +15,7 @@ import (
 	auditapi "github.com/flowcatalyst/flowcatalyst-go/internal/platform/audit/api"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth"
 	authapi "github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/api"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/bridge"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/payload"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/provider"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/client"
@@ -209,6 +210,18 @@ func WirePlatform(r chi.Router, pool *pgxpool.Pool, cfg EnvCfg) error {
 		}, cfg.JWTIssuer); err == nil {
 			disc.RegisterRoutes(r)
 		}
+
+		// OIDC bridge — POST /oauth/check-domain, GET /oauth/oidc/login,
+		// GET /oauth/oidc/callback. The bridge resolves the external IDP
+		// for an email's domain, drives the redirect dance, and on
+		// callback either uses the existing FlowCatalyst Principal or
+		// auto-provisions one via the EmailDomainMapping that drove the
+		// login. The SessionWriter is left at its default (200 + JSON
+		// {principalId}) — the frontend's OIDC bridge handler swaps it
+		// for a session-cookie write at startup.
+		bridgeClient := bridge.NewBridge(authRepo)
+		loginStateRepo := bridge.NewLoginStateRepo(pool)
+		bridge.NewLoginEndpoint(bridgeClient, loginStateRepo, principalRepo, edmRepo, uow).RegisterRoutes(r)
 
 		corsapi.Register(humaAPI, &corsapi.State{
 			Repo: corsRepo,
