@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humachi"
@@ -166,12 +167,12 @@ func WirePlatform(r chi.Router, pool *pgxpool.Pool, cfg EnvCfg) error {
 		// /oauth/authorize treats an invalid/absent session as
 		// redirect-to-login, so it validates the session cookie itself
 		// (it's mounted outside the rejecting auth middleware).
-		ValidateSession: func(token string) (string, bool) {
+		ValidateSession: func(token string) (string, time.Time, bool) {
 			c, err := authProvider.ValidateSessionToken(context.Background(), token)
 			if err != nil || c == nil {
-				return "", false
+				return "", time.Time{}, false
 			}
-			return c.Subject, true
+			return c.Subject, c.IssuedAt, true
 		},
 	}
 

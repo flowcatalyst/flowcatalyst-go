@@ -60,11 +60,13 @@ file is unaffected).
 - `/oauth/authorize?provider=` direct-IDP branch (returns server_error) —
   the Go bridge resolves IDPs by **email domain**, not provider-id; needs a
   bridge method to build an IDP authorization URL from a provider id.
-- `max_age` enforcement in authorize — the session-cookie validator doesn't
-  expose `iat`. Unify session-cookie minting onto `authservice`
-  (Rust uses one claim shape for access + session tokens) to fix cleanly.
 - In-memory per-instance rate-limit governor (perf layer atop the
   distributed store; `rate_limit_middleware.rs`).
+
+**Done since:** `max_age` enforcement in authorize (2026-05-28) —
+`sessiontoken.Claims` now carries `IssuedAt`, `ValidateSession` returns it,
+and authorize re-authenticates a session older than `max_age`
+(login_required under prompt=none).
 
 ### Parity references
 - Rust source: `crates/fc-platform/src/auth/{auth_service,oauth_api,

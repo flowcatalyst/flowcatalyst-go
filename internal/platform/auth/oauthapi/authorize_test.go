@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMatchesRedirectURI(t *testing.T) {
@@ -52,6 +53,29 @@ func TestInvalidScopes(t *testing.T) {
 	got := invalidScopes("openid bogus", nil)
 	if len(got) != 1 || got[0] != "bogus" {
 		t.Errorf("want [bogus], got %v", got)
+	}
+}
+
+func TestMaxAgeExceeded(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name     string
+		maxAge   string
+		issuedAt time.Time
+		want     bool
+	}{
+		{"absent max_age", "", now.Add(-time.Hour), false},
+		{"zero issuedAt", "60", time.Time{}, false},
+		{"within window", "3600", now.Add(-10 * time.Minute), false},
+		{"exceeded", "60", now.Add(-10 * time.Minute), true},
+		{"max_age=0 always re-auth", "0", now.Add(-time.Second), true},
+		{"invalid max_age ignored", "abc", now.Add(-time.Hour), false},
+		{"negative max_age ignored", "-5", now.Add(-time.Hour), false},
+	}
+	for _, c := range cases {
+		if got := maxAgeExceeded(c.maxAge, c.issuedAt); got != c.want {
+			t.Errorf("%s: maxAgeExceeded(%q, %v) = %v, want %v", c.name, c.maxAge, c.issuedAt, got, c.want)
+		}
 	}
 }
 

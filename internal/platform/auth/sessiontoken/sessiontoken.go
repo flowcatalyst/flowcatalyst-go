@@ -47,6 +47,9 @@ type Claims struct {
 	Roles        []string
 	Applications []string
 	Permissions  []string
+	// IssuedAt is the token's `iat` (when it was minted ≈ login time).
+	// Zero if the token carried no iat. Used for OIDC max_age enforcement.
+	IssuedAt time.Time
 }
 
 // Mint signs a JWT with the supplied claims using key. ttl == 0 mints a
@@ -133,6 +136,7 @@ func Validate(token string, key *rsa.PublicKey) (*Claims, error) {
 		Roles:        stringSliceClaim(mc, "roles"),
 		Applications: stringSliceClaim(mc, "applications"),
 		Permissions:  stringSliceClaim(mc, "permissions"),
+		IssuedAt:     unixClaim(mc, "iat"),
 	}
 	if out.Subject == "" {
 		return nil, errors.New("sessiontoken: token is missing sub claim")
@@ -145,6 +149,19 @@ func stringClaim(mc jwt.MapClaims, key string) string {
 		return v
 	}
 	return ""
+}
+
+// unixClaim reads a numeric Unix-seconds claim. JWT numeric claims
+// round-trip through JSON as float64. Returns the zero time if absent.
+func unixClaim(mc jwt.MapClaims, key string) time.Time {
+	switch v := mc[key].(type) {
+	case float64:
+		return time.Unix(int64(v), 0).UTC()
+	case int64:
+		return time.Unix(v, 0).UTC()
+	default:
+		return time.Time{}
+	}
 }
 
 // stringSliceClaim coerces a claim into []string. Tokens we mint emit

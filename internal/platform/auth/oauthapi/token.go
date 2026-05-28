@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -37,12 +38,13 @@ type State struct {
 	AuthCodes     *grantstore.AuthorizationCodeRepository
 	RefreshTokens *grantstore.RefreshTokenRepository
 	PendingAuth   *grantstore.PendingAuthRepository
-	// ValidateSession resolves the principal id from a session-cookie /
-	// bearer token on /oauth/authorize, returning ok=false when the token
-	// is absent, invalid, or expired (authorize then redirects to login
-	// rather than rejecting). Injected so this package stays decoupled
-	// from the session-token validator.
-	ValidateSession func(token string) (subject string, ok bool)
+	// ValidateSession resolves the principal id + token issue time from a
+	// session-cookie / bearer token on /oauth/authorize, returning ok=false
+	// when the token is absent, invalid, or expired (authorize then
+	// redirects to login rather than rejecting). issuedAt drives OIDC
+	// max_age enforcement (zero time = unknown). Injected so this package
+	// stays decoupled from the session-token validator.
+	ValidateSession func(token string) (subject string, issuedAt time.Time, ok bool)
 	// Encryption verifies confidential-client secrets (decrypt + compare).
 	// May be nil when no app key is configured — confidential auth then
 	// fails closed.

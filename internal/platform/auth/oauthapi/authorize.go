@@ -3,6 +3,7 @@ package oauthapi
 import (
 	"crypto/rand"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,6 +37,7 @@ func (s *State) Authorize(w http.ResponseWriter, r *http.Request) {
 	codeChallengeMethod := q.Get("code_challenge_method")
 	providerID := q.Get("provider")
 	prompt := q.Get("prompt")
+	maxAge := q.Get("max_age")
 
 	if responseType != "code" {
 		errorRedirect(w, r, redirectURI, "unsupported_response_type", "Only 'code' response type is supported", stateParam)
@@ -86,13 +88,23 @@ func (s *State) Authorize(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Resolve the session once. A session older than max_age must
+	// re-authenticate (OIDC Core §3.1.2.1), so treat it as stale below.
 	sessTok := s.sessionToken(r)
+	var sessSubject string
+	var sessIssuedAt time.Time
+	sessOK := false
+	if sessTok != "" && s.ValidateSession != nil {
+		sessSubject, sessIssuedAt, sessOK = s.ValidateSession(sessTok)
+	}
+	sessionStale := sessOK && maxAgeExceeded(maxAge, sessIssuedAt)
 
 	// prompt handling (OIDC Core §3.1.2.1).
 	forceLogin := false
 	switch prompt {
 	case "none":
-		if !s.sessionValid(sessTok) {
+		// prompt=none forbids any UI — a missing or stale session is an error.
+		if !sessOK || sessionStale {
 			errorRedirect(w, r, redirectURI, "login_required", "User is not authenticated", stateParam)
 			return
 		}
@@ -100,27 +112,23 @@ func (s *State) Authorize(w http.ResponseWriter, r *http.Request) {
 		forceLogin = true
 	}
 
-	// Authenticated session → issue the code immediately.
-	// (max_age is not enforced: the session-cookie validator doesn't expose
-	// iat. Documented divergence; max_age is a rarely-used OIDC param.)
-	if !forceLogin && sessTok != "" && s.ValidateSession != nil {
-		if subject, ok := s.ValidateSession(sessTok); ok {
-			code := grantstore.NewAuthorizationCode(randomString(64), clientID, subject, redirectURI)
-			code.Scope = strPtrOrNil(scope)
-			code.Nonce = strPtrOrNil(nonce)
-			code.State = strPtrOrNil(stateParam)
-			if codeChallenge != "" && codeChallengeMethod != "" {
-				code.CodeChallenge = &codeChallenge
-				code.CodeChallengeMethod = &codeChallengeMethod
-			}
-			if err := s.AuthCodes.Insert(r.Context(), code); err != nil {
-				errorRedirect(w, r, redirectURI, "server_error", "Failed to create authorization code", stateParam)
-				return
-			}
-			redirectURL := redirectURI + "?code=" + pctEncode(code.Code) + "&state=" + pctEncode(stateParam)
-			http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
+	// Authenticated, fresh session → issue the code immediately.
+	if !forceLogin && sessOK && !sessionStale {
+		code := grantstore.NewAuthorizationCode(randomString(64), clientID, sessSubject, redirectURI)
+		code.Scope = strPtrOrNil(scope)
+		code.Nonce = strPtrOrNil(nonce)
+		code.State = strPtrOrNil(stateParam)
+		if codeChallenge != "" && codeChallengeMethod != "" {
+			code.CodeChallenge = &codeChallenge
+			code.CodeChallengeMethod = &codeChallengeMethod
+		}
+		if err := s.AuthCodes.Insert(r.Context(), code); err != nil {
+			errorRedirect(w, r, redirectURI, "server_error", "Failed to create authorization code", stateParam)
 			return
 		}
+		redirectURL := redirectURI + "?code=" + pctEncode(code.Code) + "&state=" + pctEncode(stateParam)
+		http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
+		return
 	}
 
 	// Not authenticated → stash the request and bounce to login.
@@ -179,12 +187,19 @@ func (s *State) sessionToken(r *http.Request) string {
 	return authservice.ExtractBearerToken(r.Header.Get("Authorization"))
 }
 
-func (s *State) sessionValid(token string) bool {
-	if token == "" || s.ValidateSession == nil {
+// maxAgeExceeded reports whether the OIDC max_age (seconds) has elapsed
+// since the session token was issued. An absent/invalid max_age, or an
+// unknown issue time, is treated as "not exceeded" (lenient — max_age is
+// optional and we never want to gratuitously force re-login).
+func maxAgeExceeded(maxAge string, issuedAt time.Time) bool {
+	if maxAge == "" || issuedAt.IsZero() {
 		return false
 	}
-	_, ok := s.ValidateSession(token)
-	return ok
+	secs, err := strconv.Atoi(maxAge)
+	if err != nil || secs < 0 {
+		return false
+	}
+	return time.Since(issuedAt) > time.Duration(secs)*time.Second
 }
 
 // ─── redirect-uri matching (1:1 with Rust) ──────────────────────────────
