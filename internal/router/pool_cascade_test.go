@@ -29,11 +29,7 @@ type cascadeConsumer struct {
 	doneOnce  sync.Once
 }
 
-func (c *cascadeConsumer) Consume(ctx context.Context, n int) ([]common.QueuedMessage, error) {
-	return c.Poll(ctx, n)
-}
-
-func (c *cascadeConsumer) Poll(_ context.Context, _ int) ([]common.QueuedMessage, error) {
+func (c *cascadeConsumer) Poll(_ context.Context, _ uint32) ([]common.QueuedMessage, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.delivered {
@@ -63,10 +59,13 @@ func (c *cascadeConsumer) Defer(_ context.Context, rh string, _ *uint32) error {
 	return nil
 }
 func (c *cascadeConsumer) ExtendVisibility(_ context.Context, _ string, _ uint32) error { return nil }
-func (c *cascadeConsumer) Metrics(_ context.Context) (queue.Metrics, error) {
-	return queue.Metrics{}, nil
+func (c *cascadeConsumer) Identifier() string                                           { return "cascade-test" }
+func (c *cascadeConsumer) Healthy() bool                                                { return true }
+func (c *cascadeConsumer) Stop()                                                        {}
+func (c *cascadeConsumer) Metrics(_ context.Context) (*queue.Metrics, error) {
+	return &queue.Metrics{}, nil
 }
-func (c *cascadeConsumer) Close() error { return nil }
+func (c *cascadeConsumer) Counters() *queue.Metrics { return nil }
 
 // cascadeMediator fails the message whose ID == failID and records every ID it
 // was actually asked to mediate.

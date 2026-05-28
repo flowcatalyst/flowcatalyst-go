@@ -65,9 +65,6 @@ file is unaffected).
   (Rust uses one claim shape for access + session tokens) to fix cleanly.
 - In-memory per-instance rate-limit governor (perf layer atop the
   distributed store; `rate_limit_middleware.rs`).
-- **Pre-existing break**: `internal/router/pool_cascade_test.go` doesn't
-  compile (`cascadeConsumer` missing `Counters()` after `queue.Consumer`
-  grew) — from the prior-session WIP, not the OIDC work.
 
 ### Parity references
 - Rust source: `crates/fc-platform/src/auth/{auth_service,oauth_api,
