@@ -2,7 +2,7 @@
 
 _Created 2026-05-29. Source: full read-only parity audit (Go `flowcatalyst-go` vs Rust reference `flowcatalyst-rust`). This plan tracks closing the behavioural/operational gaps found in that audit._
 
-## Progress & Handover (updated 2026-05-29)
+## Progress & Handover (updated 2026-05-29b)
 
 **Branch:** `parity-remediation` (off `main`). **Build:** `go build ./...` clean. **Tests:** every touched suite green.
 
@@ -12,17 +12,19 @@ _Created 2026-05-29. Source: full read-only parity audit (Go `flowcatalyst-go` v
 - ✅ **Phase 2 — OIDC (O1/O2/O4/O5/O6):** `9889a77`. end_session/RP-logout (+persisted post_logout_redirect_uris), `POST /auth/refresh`, in-memory token governor + RFC-6749 `rate_limit_exceeded` 429, `max_age` (in-flight), `GET /auth/check-domain`. Folded in the in-flight governor work. **Remaining → #13** (O3 `?provider=`, O7 document `/auth/*` in spec).
 - ✅ **Phase 3 — message router (R1–R8): COMPLETE.** `a16c927`, `3d00f02`, `2545ba8`, `e346d3e`. IMMEDIATE concurrency + capacity backpressure, route-by-`poolCode` + DEFAULT-POOL (topology rewrite: consumers decoupled from passive pools), external-requeue dedup, failure-rate circuit breaker, multi-URL config-sync + retry + first-wins merge, stalled-consumer auto-restart, Rust-aligned Prometheus metrics (real `fc_mediation_duration_seconds` histogram).
 - 🟡 **Phase 4 — IAM/authz (A1/A3/A4a done):** `6cb1539`, `8e2bdc2`. A1 permission wildcard matcher + real 4-segment strings (THE critical lockout fix), A3 connection mutations anchor-only (was zero authz), A4a WebAuthn delete ownership. **Remaining → #15** (A2 scope-isolation sweep, A4b passkey blob convert-on-read, A5 password-reset flow build-out).
-- ⬜ **Phases 5–10 — not started:** Phase 5 SDK `/sync` self-registration (audit CRITICAL), Phase 6 cron+dispatch scheduler, Phase 7 stream processor, Phase 8 outbox processor, Phase 9 MCP server, Phase 10 ops/Docker.
+- ✅ **Phase 5 — SDK `/sync` self-registration: COMPLETE.** `a4bf0fb`, `bb1936d`, `c8a6295`, `aa1cf67`, `4478579`, `2194679`, `5c2f072`. New `internal/platform/sdksync` package mounts all 8 `POST /api/applications/{appCode}/{resource}/sync` endpoints (roles, event-types, subscriptions, dispatch-pools, principals, processes, scheduled-jobs, openapi) at byte-parity with Rust `sdk_sync_api.rs` (shared `SyncResultResponse {applicationCode,created,updated,deleted,syncedCodes}`; scheduled-jobs + openapi have their distinct shapes). Built 6 new Sync use-cases (roles/subscriptions/dispatch-pools/principals/processes/scheduled-jobs) + reused event-types/openapi; added per-resource `*Synced` rollup events + the `can_sync_*` authz helpers (full Rust permission sets incl. application-service grants) + the SDK permission constants. Each handler resolves `{appCode}`→app (404 unknown), checks the sync permission, and (openapi/scheduled-jobs) enforces the resource-level guard (own service-account / target-client / anchor). Key parity nuances mirrored: role names `{appCode}:{name.lower()}` + SDK-source-only mutation + ROLE_HAS_ASSIGNMENTS refusal; dispatch-pools global + archive-on-prune + code regex; subscriptions `mode` accepted-but-not-applied; principals SDK_SYNC role merge + strip-on-unlisted; scheduled-jobs change-detection + re-activate + ID-array result.
+- ⬜ **Phases 6–10 — not started:** Phase 6 cron+dispatch scheduler, Phase 7 stream processor, Phase 8 outbox processor (incl. MongoDB), Phase 9 MCP server, Phase 10 ops/Docker.
 
 ### Commits on `parity-remediation`
-`ccd5f93` P1 · `9889a77` P2 · `a16c927` P3-R1 · `3d00f02` P3-R2/R4 · `2545ba8` P3-R3/R5 · `e346d3e` P3-R7/R8 · `6cb1539` P4-A1 · `8e2bdc2` P4-A3/A4a
+`ccd5f93` P1 · `9889a77` P2 · `a16c927` P3-R1 · `3d00f02` P3-R2/R4 · `2545ba8` P3-R3/R5 · `e346d3e` P3-R7/R8 · `6cb1539` P4-A1 · `8e2bdc2` P4-A3/A4a · `a4bf0fb` P5-eventtypes · `bb1936d` P5-roles · `c8a6295` P5-openapi · `aa1cf67` P5-processes+pools · `4478579` P5-subscriptions · `2194679` P5-principals · `5c2f072` P5-scheduledjobs
 
 ### Open tracked follow-ups
 - **#13** — O3 (`?provider=` direct-IDP) + O7 (document `/auth/*` in `api/openapi.lock.json`). Niche / doc-only.
 - **#15** — A2 (per-resource scope checks on by-ID mutations; scheduled-jobs overlaps Phase 6) + A4b (convert-on-read for `webauthn-rs` Passkey → `go-webauthn` Credential; only bites if prod has passkeys) + A5 (unauthenticated password-reset request/confirm flow, **lowercase-hex** SHA-256 tokens).
 
 ### Resume notes / handover
-- **Recommended next:** Phase 5 (SDK `/sync`) — highest-value remaining (external SDK contract, drop-in priority).
+- **Recommended next:** Phase 6 (cron + dispatch scheduler). Then Phase 7 (stream), Phase 8 (outbox incl. MongoDB), Phase 9 (MCP), Phase 10 (ops/Docker).
+- **Phase 5 follow-ups (minor, not blocking):** subscription event-type-binding `filter` is set in-memory by the sync use-case but the existing subscription repo `Persist` doesn't write it to `msg_subscription_event_types` (pre-existing Go gap shared by all subscription writes — fix in the persistence/sqlc layer, not sdksync). The Go sync use-cases emit per-row domain events (matching the existing Go `SyncEventTypes` convention); the Rust sync use-cases emit only the rollup — internal/audit-only divergence, no wire impact.
 - **Verify-before-deploy decisions:** run `tools/baseline-goose-ledger.sql` before first Go boot against an existing migrated DB (goose ledger baseline; owner accepted msg_events recreation otherwise).
 - **Intentionally uncommitted:** `.claude/settings.json` (read-only Bash allowlist added this session) and `HANDOFF.md` (a separate, pre-existing in-flight working doc — not part of this effort).
 - **Parity method:** Rust reference at `~/Developer/flowcatalyst-rust`; for platform-API shapes diff the OpenAPI specs (`api/openapi.lock.json` vs `frontend/openapi/openapi.json`), not source. Behavioural parity (OIDC/router/crypto/etc.) is verified against Rust source 1:1.
