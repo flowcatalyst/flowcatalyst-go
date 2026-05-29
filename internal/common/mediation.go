@@ -17,6 +17,9 @@ const (
 	// don't count toward circuit-breaker failures: destination is
 	// healthy, just throttling us.
 	MediationRateLimited
+	// MediationCircuitOpen means the per-endpoint breaker is open; no HTTP
+	// call was attempted. DEFER (not a failure) until the breaker may probe.
+	MediationCircuitOpen
 )
 
 // MediationOutcome carries the result plus optional retry-after delay.
@@ -62,4 +65,12 @@ func RateLimited(retryAfterSec int) MediationOutcome {
 		StatusCode:   429,
 		ErrorMessage: "HTTP 429: Too Many Requests",
 	}
+}
+
+// CircuitOpen builds a circuit-open outcome: the per-endpoint breaker is open,
+// so no HTTP call was attempted. The pool DEFERS with delaySec (the breaker's
+// reset timeout) and, for ordered messages, marks the batch+group failed to
+// preserve FIFO — 1:1 with the prior pool circuit-open path.
+func CircuitOpen(delaySec int) MediationOutcome {
+	return MediationOutcome{Result: MediationCircuitOpen, DelaySeconds: delaySec}
 }

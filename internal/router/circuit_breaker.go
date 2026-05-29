@@ -95,6 +95,10 @@ func (cb *CircuitBreaker) State() CircuitState {
 	return cb.state
 }
 
+// ResetTimeout returns the configured open→half-open wait. The mediator uses it
+// to set the defer delay when it returns a circuit-open outcome.
+func (cb *CircuitBreaker) ResetTimeout() time.Duration { return cb.cfg.ResetTimeout }
+
 // Allow reports whether a request is permitted. Open transitions to HalfOpen
 // once ResetTimeout has elapsed since the last failure (1:1 with Rust
 // allow_request).

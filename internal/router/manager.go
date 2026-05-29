@@ -33,7 +33,6 @@ const defaultPoolConcurrency uint32 = 20
 // consumer (resolved by QueueIdentifier via resolveConsumer).
 type Manager struct {
 	mediator Mediator
-	breakers *BreakerRegistry
 	tracker  *InFlightTracker
 
 	mu        sync.Mutex
@@ -58,13 +57,12 @@ type runningConsumer struct {
 	lastPoll atomic.Int64
 }
 
-// NewManager builds a manager. The mediator is shared by all pools; the
-// breaker registry is shared so per-URL state survives pool reloads.
-// tracker may be nil; if so, pools run without in-flight tracking.
-func NewManager(mediator Mediator, breakers *BreakerRegistry, tracker *InFlightTracker) *Manager {
+// NewManager builds a manager. The mediator (which now owns the per-endpoint
+// circuit breakers) is shared by all pools. tracker may be nil; if so, pools
+// run without in-flight tracking.
+func NewManager(mediator Mediator, tracker *InFlightTracker) *Manager {
 	return &Manager{
 		mediator:   mediator,
-		breakers:   breakers,
 		tracker:    tracker,
 		pools:      make(map[string]*Pool),
 		consumers:  make(map[string]*runningConsumer),
@@ -407,7 +405,7 @@ func (m *Manager) Reconfigure(ctx context.Context, cfg common.RouterConfig) erro
 			}
 			continue
 		}
-		m.pools[code] = NewPool(pc, m.mediator, m.breakers, m.tracker, m.resolveConsumer)
+		m.pools[code] = NewPool(pc, m.mediator, m.tracker, m.resolveConsumer)
 	}
 
 	// Consumers: stop removed/changed, start new. A queue config change

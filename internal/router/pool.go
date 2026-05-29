@@ -25,7 +25,6 @@ import (
 type Pool struct {
 	cfg      common.PoolConfig
 	mediator Mediator
-	breakers *BreakerRegistry
 	limiter  *RateLimiter
 	tracker  *InFlightTracker
 	metrics  *PoolMetricsCollector
@@ -99,7 +98,7 @@ func (gq *groupQueue) empty() bool {
 // NewPool wires a pool. tracker may be nil; if so, in-flight tracking
 // (and consequently stall detection + duplicate filtering) is disabled
 // for messages handled by this pool.
-func NewPool(cfg common.PoolConfig, mediator Mediator, breakers *BreakerRegistry, tracker *InFlightTracker, resolveConsumer func(queueID string) queue.Consumer) *Pool {
+func NewPool(cfg common.PoolConfig, mediator Mediator, tracker *InFlightTracker, resolveConsumer func(queueID string) queue.Consumer) *Pool {
 	rate := uint32(0)
 	if cfg.RateLimitPerMinute != nil {
 		rate = *cfg.RateLimitPerMinute
@@ -116,7 +115,6 @@ func NewPool(cfg common.PoolConfig, mediator Mediator, breakers *BreakerRegistry
 	p := &Pool{
 		cfg:             cfg,
 		mediator:        mediator,
-		breakers:        breakers,
 		limiter:         NewRateLimiter(rate),
 		tracker:         tracker,
 		metrics:         NewPoolMetricsCollector(),
@@ -295,8 +293,8 @@ func (p *Pool) runImmediate(ctx context.Context, m common.QueuedMessage) {
 	case sem <- struct{}{}:
 	}
 	p.queueSize.Add(^uint32(0)) // now active, not queued
+	defer func() { <-sem }()    // release on every exit path (acquired above)
 	p.processOne(ctx, m, false)
-	<-sem
 }
 
 // Stop signals the pool to exit. Run will return on its next loop.
@@ -503,9 +501,13 @@ func (p *Pool) drainGroup(ctx context.Context, group string) {
 		case sem <- struct{}{}:
 		}
 
-		p.processOne(ctx, msg, true)
-		// Release the slot back to the same channel we acquired from.
-		<-sem
+		// Release the slot per iteration even if processOne panics past its own
+		// recover — a bare deferred <-sem would accumulate across the loop, so
+		// scope it to a closure.
+		func() {
+			defer func() { <-sem }()
+			p.processOne(ctx, msg, true)
+		}()
 	}
 }
 
@@ -517,6 +519,21 @@ func (p *Pool) drainGroup(ctx context.Context, group string) {
 func (p *Pool) processOne(ctx context.Context, qm common.QueuedMessage, cascade bool) {
 	p.activeWorkers.Add(1)
 	defer p.activeWorkers.Add(^uint32(0)) // atomic decrement
+
+	// Panic isolation (Rust Drop parity): resolution (ack/nack/defer) happens
+	// after Mediate in the switch below, so a panic mid-mediation would strand
+	// the message AND crash the process (an unrecovered panic in a goroutine
+	// takes down the program). Recover, NACK for prompt redelivery, and keep
+	// the worker alive. Runs after tracker.Remove / bgDecrement (registered
+	// later, LIFO) so tracking is cleaned first; the panic window precedes
+	// resolution, so this cannot double-resolve.
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("panic in processOne; NACKing for redelivery",
+				"msg", qm.Message.ID, "panic", r)
+			p.nackMsg(ctx, qm, ptrU32(10), "panic during processing")
+		}
+	}()
 
 	// Batch+group FIFO cascade: this delivery was counted at enqueue, so
 	// release its slot on every exit path. Mirrors Rust's post-process
@@ -555,30 +572,17 @@ func (p *Pool) processOne(ctx context.Context, qm common.QueuedMessage, cascade 
 		return
 	}
 
-	// Circuit breaker per target URL.
-	cb := p.breakers.Get(qm.Message.MediationTarget)
-	if err := cb.Allow(); err != nil {
-		// Breaker open: the message can't be delivered now, so (for ordered
-		// messages) mark its batch+group failed to keep later messages in
-		// order, then defer until the breaker's open timeout elapses.
-		if cascade && hasBatchGroup {
-			p.bgMarkFailed(bgKey)
-		}
-		p.deferMsg(ctx, qm, ptrU32(uint32(DefaultBreakerConfig().ResetTimeout.Seconds())), "circuit breaker open")
-		return
-	}
-
 	start := time.Now()
 	outcome := p.mediator.Mediate(ctx, &qm.Message)
 	durationMs := uint64(time.Since(start).Milliseconds())
 
 	switch outcome.Result {
 	case common.MediationSuccess:
-		cb.RecordSuccess()
 		p.metrics.RecordSuccess(durationMs)
 		p.ackMsg(ctx, qm)
 
 	case common.MediationErrorConfig:
+		// The mediator already recorded the breaker success (4xx = reachable).
 		// 4xx — ACK to avoid infinite retries. Do NOT trip the breaker.
 		// (The destination is "healthy" in the sense that it responded.)
 		// Rust counts this against total_failure (it was a non-success
@@ -587,7 +591,6 @@ func (p *Pool) processOne(ctx context.Context, qm common.QueuedMessage, cascade 
 		p.ackMsg(ctx, qm)
 
 	case common.MediationErrorProcess:
-		cb.RecordFailure()
 		// Transient: message will be redelivered, so don't penalise
 		// the all-time failure counter. Matches Rust record_transient.
 		p.metrics.RecordTransient(durationMs)
@@ -599,7 +602,6 @@ func (p *Pool) processOne(ctx context.Context, qm common.QueuedMessage, cascade 
 		p.nackMsg(ctx, qm, ptrU32(uint32(outcome.DelaySeconds)), "process error")
 
 	case common.MediationErrorConnection:
-		cb.RecordFailure()
 		p.metrics.RecordFailure(durationMs)
 		// FIFO cascade (ordered only): mark the batch+group failed so the
 		// remaining ordered messages NACK.
@@ -612,6 +614,16 @@ func (p *Pool) processOne(ctx context.Context, qm common.QueuedMessage, cascade 
 		// 429 — defer with Retry-After; NOT a breaker failure.
 		p.metrics.RecordRateLimited()
 		p.deferMsg(ctx, qm, ptrU32(uint32(outcome.DelaySeconds)), "rate limited")
+
+	case common.MediationCircuitOpen:
+		// Breaker open (decided by the mediator): no delivery was attempted.
+		// For ordered messages mark the batch+group failed to preserve FIFO,
+		// then DEFER until the breaker reset timeout elapses (carried in the
+		// outcome). 1:1 with the prior in-pool circuit-open path.
+		if cascade && hasBatchGroup {
+			p.bgMarkFailed(bgKey)
+		}
+		p.deferMsg(ctx, qm, ptrU32(uint32(outcome.DelaySeconds)), "circuit breaker open")
 	}
 }
 

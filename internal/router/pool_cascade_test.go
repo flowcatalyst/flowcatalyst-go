@@ -86,7 +86,7 @@ func submitBatch(ctx context.Context, p *Pool, msgs []common.QueuedMessage) {
 
 func newCascadePool(med Mediator, resolve func(string) queue.Consumer) *Pool {
 	cfg := common.PoolConfig{Code: "test", Concurrency: 1}
-	return NewPool(cfg, med, NewBreakerRegistry(DefaultBreakerConfig()), nil, resolve)
+	return NewPool(cfg, med, nil, resolve)
 }
 
 // TestPoolBatchGroupCascadeNack verifies Rust-parity FIFO behaviour for

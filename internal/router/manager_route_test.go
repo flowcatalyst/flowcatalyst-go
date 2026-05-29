@@ -16,10 +16,10 @@ import (
 // back to DEFAULT-POOL.
 func TestManagerPoolForMessage(t *testing.T) {
 	med := &cascadeMediator{}
-	m := NewManager(med, NewBreakerRegistry(DefaultBreakerConfig()), nil)
+	m := NewManager(med, nil)
 	resolve := func(string) queue.Consumer { return nil }
-	poolA := NewPool(common.PoolConfig{Code: "A"}, med, m.breakers, nil, resolve)
-	poolDefault := NewPool(common.PoolConfig{Code: defaultPoolCode}, med, m.breakers, nil, resolve)
+	poolA := NewPool(common.PoolConfig{Code: "A"}, med, nil, resolve)
+	poolDefault := NewPool(common.PoolConfig{Code: defaultPoolCode}, med, nil, resolve)
 	m.pools["A"] = poolA
 	m.pools[defaultPoolCode] = poolDefault
 
@@ -51,8 +51,8 @@ func TestInFlightTrackerExternalRequeue(t *testing.T) {
 func TestManagerRouteExternalRequeueAcks(t *testing.T) {
 	med := &cascadeMediator{}
 	tr := NewInFlightTracker()
-	m := NewManager(med, NewBreakerRegistry(DefaultBreakerConfig()), tr)
-	m.pools[defaultPoolCode] = NewPool(common.PoolConfig{Code: defaultPoolCode}, med, m.breakers, tr, func(string) queue.Consumer { return nil })
+	m := NewManager(med, tr)
+	m.pools[defaultPoolCode] = NewPool(common.PoolConfig{Code: defaultPoolCode}, med, tr, func(string) queue.Consumer { return nil })
 
 	// The original is in flight under broker1.
 	tr.Insert(common.NewInFlightMessage(&common.Message{ID: "app1"}, "broker1", "q", "b", "rh-orig"))

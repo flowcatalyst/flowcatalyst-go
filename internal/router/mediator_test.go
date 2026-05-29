@@ -23,10 +23,10 @@ func TestMediatorPayloadAndSignatureFormat(t *testing.T) {
 	// canonical formula. This is the parity test for the at-risk
 	// HMAC site flagged in docs/api-parity.md.
 	var (
-		gotBody    []byte
-		gotSig     string
-		gotTs      string
-		gotAuth    string
+		gotBody []byte
+		gotSig  string
+		gotTs   string
+		gotAuth string
 	)
 	secret := "test-secret-do-not-use-in-prod"
 
@@ -39,7 +39,7 @@ func TestMediatorPayloadAndSignatureFormat(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mediator := router.NewHTTPMediator(router.DevMediatorConfig())
+	mediator := router.NewHTTPMediator(router.DevMediatorConfig(), router.NewBreakerRegistry(router.DefaultBreakerConfig()))
 	authToken := "abc"
 	signing := secret
 	msg := &common.Message{
@@ -80,7 +80,7 @@ func TestMediatorBadRequestIsConfigError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	out := router.NewHTTPMediator(router.DevMediatorConfig()).Mediate(
+	out := router.NewHTTPMediator(router.DevMediatorConfig(), router.NewBreakerRegistry(router.DefaultBreakerConfig())).Mediate(
 		context.Background(),
 		&common.Message{ID: "m", MediationType: common.MediationTypeHTTP, MediationTarget: srv.URL},
 	)
@@ -95,7 +95,7 @@ func TestMediatorRateLimitedReadsRetryAfter(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	out := router.NewHTTPMediator(router.DevMediatorConfig()).Mediate(
+	out := router.NewHTTPMediator(router.DevMediatorConfig(), router.NewBreakerRegistry(router.DefaultBreakerConfig())).Mediate(
 		context.Background(),
 		&common.Message{ID: "m", MediationType: common.MediationTypeHTTP, MediationTarget: srv.URL},
 	)
@@ -116,7 +116,7 @@ func TestMediatorServerErrorRetries(t *testing.T) {
 	cfg.MaxRetries = 3
 	cfg.RetryDelays = []time.Duration{1 * time.Millisecond, 1 * time.Millisecond}
 
-	out := router.NewHTTPMediator(cfg).Mediate(
+	out := router.NewHTTPMediator(cfg, router.NewBreakerRegistry(router.DefaultBreakerConfig())).Mediate(
 		context.Background(),
 		&common.Message{ID: "m", MediationType: common.MediationTypeHTTP, MediationTarget: srv.URL},
 	)
@@ -151,7 +151,7 @@ func TestMediatorHTTP2_DispatchSucceeds(t *testing.T) {
 		MaxRetries:     0,
 		RetryDelays:    []time.Duration{},
 	}
-	m := router.NewHTTPMediator(cfg)
+	m := router.NewHTTPMediator(cfg, router.NewBreakerRegistry(router.DefaultBreakerConfig()))
 	// httptest's TLS server uses a self-signed cert; swap in its CA pool
 	// by re-wrapping the underlying client's transport.
 	// We can't easily reach in to set RootCAs without exporting a hook,
@@ -186,11 +186,11 @@ func TestMediatorConnectTimeoutHonoured(t *testing.T) {
 		MaxRetries:     0,
 		RetryDelays:    []time.Duration{},
 	}
-	m := router.NewHTTPMediator(cfg)
+	m := router.NewHTTPMediator(cfg, router.NewBreakerRegistry(router.DefaultBreakerConfig()))
 
 	msg := &common.Message{
-		ID:              "test-msg-1",
-		MediationType:   common.MediationTypeHTTP,
+		ID:            "test-msg-1",
+		MediationType: common.MediationTypeHTTP,
 		// TEST-NET-1 (RFC 5737) — guaranteed unroutable.
 		MediationTarget: "http://192.0.2.1:65000/webhook",
 	}
@@ -217,7 +217,7 @@ func TestMediatorAckFalseIsTransient(t *testing.T) {
 	cfg := router.DevMediatorConfig()
 	cfg.MaxRetries = 0
 
-	out := router.NewHTTPMediator(cfg).Mediate(
+	out := router.NewHTTPMediator(cfg, router.NewBreakerRegistry(router.DefaultBreakerConfig())).Mediate(
 		context.Background(),
 		&common.Message{ID: "m", MediationType: common.MediationTypeHTTP, MediationTarget: srv.URL},
 	)

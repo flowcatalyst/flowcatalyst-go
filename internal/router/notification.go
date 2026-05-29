@@ -22,6 +22,7 @@ const (
 	WarningCategoryRateLimit     WarningCategory = "RATE_LIMIT"
 	WarningCategoryCircuitBreak  WarningCategory = "CIRCUIT_BREAKER"
 	WarningCategoryStall         WarningCategory = "STALL"
+	WarningCategoryResource      WarningCategory = "RESOURCE"
 )
 
 // WarningSeverity mirrors the Rust enum.
