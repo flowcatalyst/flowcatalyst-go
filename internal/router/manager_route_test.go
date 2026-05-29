@@ -32,6 +32,32 @@ func TestManagerPoolForMessage(t *testing.T) {
 	assert.Same(t, poolDefault, m.poolForMessage(mk("NOPE")), "unknown pool_code → DEFAULT-POOL")
 }
 
+// TestManagerUnknownPoolRecordsRoutingWarning verifies the manager surfaces an
+// unknown pool_code as a Routing warning (matching the Rust router), while the
+// normal empty-pool_code default does not warn.
+func TestManagerUnknownPoolRecordsRoutingWarning(t *testing.T) {
+	med := &cascadeMediator{}
+	m := NewManager(med, nil)
+	ws := NewWarningService(DefaultWarningServiceConfig())
+	m.SetWarnings(ws)
+	resolve := func(string) queue.Consumer { return nil }
+	m.pools[defaultPoolCode] = NewPool(common.PoolConfig{Code: defaultPoolCode}, med, nil, resolve)
+
+	// Unknown (non-empty) pool_code → DEFAULT-POOL + exactly one Routing warning.
+	if p := m.poolForMessage(common.QueuedMessage{Message: common.Message{ID: "x", PoolCode: "NOPE"}}); p == nil {
+		t.Fatal("expected DEFAULT-POOL fallback for unknown pool_code")
+	}
+	if got := len(ws.ByCategory(WarningCategoryRouting)); got != 1 {
+		t.Fatalf("unknown pool_code must record exactly one Routing warning; got %d", got)
+	}
+
+	// Empty pool_code is the normal default — it must NOT warn.
+	m.poolForMessage(common.QueuedMessage{Message: common.Message{ID: "y", PoolCode: ""}})
+	if got := len(ws.ByCategory(WarningCategoryRouting)); got != 1 {
+		t.Fatalf("empty pool_code must not warn; routing warnings now %d", got)
+	}
+}
+
 // TestInFlightTrackerExternalRequeue covers the R4 dedup predicate: the same
 // app message id in flight under a DIFFERENT broker id is an external requeue;
 // the same broker id, an unknown id, or a blank broker id is not.

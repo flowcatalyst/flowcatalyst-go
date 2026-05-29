@@ -123,6 +123,8 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if hm, ok := s.Mediator.(*HTTPMediator); ok {
 		hm.SetWarnings(s.Warnings)
 	}
+	// Surface manager routing/capacity warnings (unknown pool_code, all-pools-full).
+	s.Manager.SetWarnings(s.Warnings)
 	s.Health = NewHealthService(DefaultHealthServiceConfig(), s.Warnings)
 	s.Lifecycle = NewLifecycleManager(DefaultLifecycleConfig(), s.Warnings, s.Health)
 	// The Manager owns the consumer poll loops, so it is the consumer-restart

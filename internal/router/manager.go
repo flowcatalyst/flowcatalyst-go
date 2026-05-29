@@ -34,6 +34,7 @@ const defaultPoolConcurrency uint32 = 20
 type Manager struct {
 	mediator Mediator
 	tracker  *InFlightTracker
+	warnings atomic.Pointer[WarningService] // optional; set via SetWarnings. nil → no-op.
 
 	mu        sync.Mutex
 	pools     map[string]*Pool              // pool code → passive pool
@@ -70,6 +71,10 @@ func NewManager(mediator Mediator, tracker *InFlightTracker) *Manager {
 		publishers: make(map[string]queue.Publisher),
 	}
 }
+
+// SetWarnings wires a WarningService so routing/capacity conditions surface on
+// /warnings and into health. Opt-in; set once at startup before Start.
+func (m *Manager) SetWarnings(ws *WarningService) { m.warnings.Store(ws) }
 
 // resolveConsumer maps a message's origin queue to its consumer so a pool can
 // ack/nack on the right queue. Returns nil if the queue was deregistered.
@@ -278,10 +283,14 @@ func (m *Manager) poolForMessage(msg common.QueuedMessage) *Pool {
 		if p, ok := m.pools[code]; ok {
 			return p
 		}
-		// Unknown pool code → DEFAULT-POOL. (Surfacing this in
-		// /monitoring/warnings as a Routing warning is a follow-up.)
+		// Unknown pool code → DEFAULT-POOL, surfaced as a Routing warning
+		// (1:1 with the Rust router's unknown-pool_code warning).
 		slog.Warn("no pool found for pool_code; routing to DEFAULT-POOL",
 			"msg", msg.Message.ID, "pool_code", code, "default_pool", defaultPoolCode)
+		if w := m.warnings.Load(); w != nil {
+			w.Add(WarningCategoryRouting, WarningWarning,
+				fmt.Sprintf("no pool for pool_code %q; routed to %s", code, defaultPoolCode), "router")
+		}
 	}
 	return m.pools[defaultPoolCode]
 }
@@ -293,12 +302,22 @@ func (m *Manager) poolForMessage(msg common.QueuedMessage) *Pool {
 func (m *Manager) runConsumer(ctx context.Context, rc *runningConsumer) {
 	defer m.wg.Done()
 	const maxPoll = 10
+	wasFull := false
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		// Backpressure: if every pool is full, wait rather than poll.
+		// Backpressure: if every pool is full, wait rather than poll. Surface the
+		// transition into full as a PoolCapacity warning (once per full period,
+		// not every tick, to avoid flooding /warnings).
 		if !m.hasPoolCapacity() {
+			if !wasFull {
+				wasFull = true
+				if w := m.warnings.Load(); w != nil {
+					w.Add(WarningCategoryPoolCapacity, WarningWarning,
+						fmt.Sprintf("all pools at capacity; pausing %s", rc.consumer.Identifier()), "router")
+				}
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -306,6 +325,7 @@ func (m *Manager) runConsumer(ctx context.Context, rc *runningConsumer) {
 			}
 			continue
 		}
+		wasFull = false
 
 		msgs, err := rc.consumer.Poll(ctx, maxPoll)
 		rc.lastPoll.Store(time.Now().UnixNano()) // progress heartbeat for the restart watchdog
