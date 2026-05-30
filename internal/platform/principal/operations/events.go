@@ -8,17 +8,18 @@ import (
 )
 
 const (
-	UserCreatedType            = "platform:iam:user:created"
-	UserUpdatedType            = "platform:iam:user:updated"
-	UserActivatedType          = "platform:iam:user:activated"
-	UserDeactivatedType        = "platform:iam:user:deactivated"
-	UserDeletedType            = "platform:iam:user:deleted"
-	UserPasswordResetType      = "platform:iam:user:password-reset-completed"
-	RolesAssignedType          = "platform:iam:user:roles-assigned"
-	ApplicationAccessType      = "platform:iam:user:application-access-assigned"
-	ClientAccessGrantedType    = "platform:iam:user:client-access-granted"
-	ClientAccessRevokedType    = "platform:iam:user:client-access-revoked"
-	Source                     = "platform:iam"
+	UserCreatedType         = "platform:iam:user:created"
+	UserUpdatedType         = "platform:iam:user:updated"
+	UserActivatedType       = "platform:iam:user:activated"
+	UserDeactivatedType     = "platform:iam:user:deactivated"
+	UserDeletedType         = "platform:iam:user:deleted"
+	UserPasswordResetType   = "platform:iam:user:password-reset-completed"
+	RolesAssignedType       = "platform:iam:user:roles-assigned"
+	ApplicationAccessType   = "platform:iam:user:application-access-assigned"
+	ClientAccessGrantedType = "platform:iam:user:client-access-granted"
+	ClientAccessRevokedType = "platform:iam:user:client-access-revoked"
+	PrincipalsSyncedType    = "platform:iam:principals:synced"
+	Source                  = "platform:iam"
 )
 
 func subjectFor(id string) string { return "platform.principal." + id }
@@ -286,4 +287,38 @@ func defaultEmpty(xs []string) []string {
 		return []string{}
 	}
 	return xs
+}
+
+// PrincipalsSynced is the rollup emitted by the SDK app-scoped principal sync
+// (SyncPrincipals). "Deactivated" counts principals from which SDK_SYNC role
+// assignments were stripped during removeUnlisted (the principals themselves
+// are not deleted) — matching the Rust PrincipalsSynced semantics.
+type PrincipalsSynced struct {
+	Metadata        usecase.EventMetadata
+	ApplicationCode string
+	Created         uint32
+	Updated         uint32
+	Deactivated     uint32
+	SyncedEmails    []string
+}
+
+func (e PrincipalsSynced) EventID() string       { return e.Metadata.EventID }
+func (e PrincipalsSynced) EventType() string     { return PrincipalsSyncedType }
+func (e PrincipalsSynced) SpecVersion() string   { return "1.0" }
+func (e PrincipalsSynced) Source() string        { return Source }
+func (e PrincipalsSynced) Subject() string       { return "platform.principals." + e.ApplicationCode }
+func (e PrincipalsSynced) Time() time.Time       { return e.Metadata.OccurredAt }
+func (e PrincipalsSynced) PrincipalID() string   { return e.Metadata.PrincipalID }
+func (e PrincipalsSynced) CorrelationID() string { return e.Metadata.CorrelationID }
+func (e PrincipalsSynced) CausationID() string   { return e.Metadata.CausationID }
+func (e PrincipalsSynced) ExecutionID() string   { return e.Metadata.ExecutionID }
+func (e PrincipalsSynced) MessageGroup() string  { return "platform:principals" }
+func (e PrincipalsSynced) ToDataJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		ApplicationCode string   `json:"applicationCode"`
+		Created         uint32   `json:"created"`
+		Updated         uint32   `json:"updated"`
+		Deactivated     uint32   `json:"deactivated"`
+		SyncedEmails    []string `json:"syncedEmails"`
+	}{e.ApplicationCode, e.Created, e.Updated, e.Deactivated, e.SyncedEmails})
 }

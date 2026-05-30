@@ -17,8 +17,20 @@ type LifecycleConfig struct {
 	// ConsumerHealthInterval drives HealthService.Cleanup (logs stalled
 	// consumers, runs the warning cleanup as a side effect — but
 	// dedicated WarningCleanupInterval ensures cleanup happens even when
-	// HealthService.Cleanup runs less often).
+	// HealthService.Cleanup runs less often). The consumer-restart watchdog
+	// runs on this same tick.
 	ConsumerHealthInterval time.Duration
+	// ConsumerStallThreshold is how long a consumer poll loop may go without
+	// completing a poll before the restart watchdog re-spawns it. Generous
+	// vs the ~20s SQS long-poll. Mirrors the Rust consumer auto-restart delay.
+	ConsumerStallThreshold time.Duration
+}
+
+// ConsumerRestarter re-spawns consumer poll loops that have stalled. The
+// router Manager implements it; LifecycleManager calls it on the
+// consumer-health tick when set.
+type ConsumerRestarter interface {
+	RestartStalledConsumers(ctx context.Context, threshold time.Duration) int
 }
 
 // DefaultLifecycleConfig returns the Rust defaults.
@@ -27,6 +39,7 @@ func DefaultLifecycleConfig() LifecycleConfig {
 		WarningCleanupInterval: 5 * time.Minute,
 		HealthReportInterval:   1 * time.Minute,
 		ConsumerHealthInterval: 30 * time.Second,
+		ConsumerStallThreshold: 90 * time.Second,
 	}
 }
 
@@ -52,6 +65,9 @@ type LifecycleManager struct {
 	poolStatsProviderMu sync.RWMutex
 	poolStatsProvider   PoolStatsProvider
 
+	consumerRestarterMu sync.RWMutex
+	consumerRestarter   ConsumerRestarter
+
 	startOnce sync.Once
 	stopOnce  sync.Once
 	cancelFn  context.CancelFunc
@@ -70,6 +86,9 @@ func NewLifecycleManager(cfg LifecycleConfig, ws *WarningService, hs *HealthServ
 	}
 	if cfg.ConsumerHealthInterval <= 0 {
 		cfg.ConsumerHealthInterval = 30 * time.Second
+	}
+	if cfg.ConsumerStallThreshold <= 0 {
+		cfg.ConsumerStallThreshold = 90 * time.Second
 	}
 	if ws == nil {
 		ws = NoopWarningService()
@@ -97,6 +116,15 @@ func (l *LifecycleManager) SetPoolStatsProvider(p PoolStatsProvider) {
 	l.poolStatsProviderMu.Lock()
 	l.poolStatsProvider = p
 	l.poolStatsProviderMu.Unlock()
+}
+
+// SetConsumerRestarter wires the source of consumer-restart (the router
+// Manager). When nil, the consumer-health loop only runs HealthService
+// cleanup; when set, it also restarts stalled consumer poll loops.
+func (l *LifecycleManager) SetConsumerRestarter(r ConsumerRestarter) {
+	l.consumerRestarterMu.Lock()
+	l.consumerRestarter = r
+	l.consumerRestarterMu.Unlock()
 }
 
 // Start spawns the background tasks. Idempotent — only spawns on the
@@ -173,10 +201,11 @@ func (l *LifecycleManager) Shutdown(ctx context.Context) error {
 // deferred t.Stop(); we never close it.
 //
 // Wakeup conditions:
-//   <-ctx.Done() — shutdown; log and exit.
-//   <-t.C        — interval elapsed; run Cleanup. NB: t.C is dropped if
-//                  Cleanup overruns the interval — by design (no
-//                  pile-up).
+//
+//	<-ctx.Done() — shutdown; log and exit.
+//	<-t.C        — interval elapsed; run Cleanup. NB: t.C is dropped if
+//	               Cleanup overruns the interval — by design (no
+//	               pile-up).
 func (l *LifecycleManager) warningCleanupLoop(ctx context.Context) {
 	t := time.NewTicker(l.cfg.WarningCleanupInterval)
 	defer t.Stop()
@@ -194,9 +223,10 @@ func (l *LifecycleManager) warningCleanupLoop(ctx context.Context) {
 // consumerHealthLoop runs HealthService.Cleanup on a ticker.
 //
 // Wakeup conditions:
-//   <-ctx.Done() — shutdown.
-//   <-t.C        — interval elapsed; run Cleanup (also runs
-//                  WarningService.Cleanup as a side effect).
+//
+//	<-ctx.Done() — shutdown.
+//	<-t.C        — interval elapsed; run Cleanup (also runs
+//	               WarningService.Cleanup as a side effect).
 func (l *LifecycleManager) consumerHealthLoop(ctx context.Context) {
 	t := time.NewTicker(l.cfg.ConsumerHealthInterval)
 	defer t.Stop()
@@ -207,6 +237,14 @@ func (l *LifecycleManager) consumerHealthLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			l.healthService.Cleanup()
+			l.consumerRestarterMu.RLock()
+			r := l.consumerRestarter
+			l.consumerRestarterMu.RUnlock()
+			if r != nil {
+				if n := r.RestartStalledConsumers(ctx, l.cfg.ConsumerStallThreshold); n > 0 {
+					slog.Warn("restarted stalled consumers", "count", n)
+				}
+			}
 		}
 	}
 }
@@ -216,8 +254,9 @@ func (l *LifecycleManager) consumerHealthLoop(ctx context.Context) {
 // SetPoolStatsProvider, so reads must be guarded.
 //
 // Wakeup conditions:
-//   <-ctx.Done() — shutdown.
-//   <-t.C        — interval elapsed; gather stats, emit log line.
+//
+//	<-ctx.Done() — shutdown.
+//	<-t.C        — interval elapsed; gather stats, emit log line.
 func (l *LifecycleManager) healthReportLoop(ctx context.Context) {
 	t := time.NewTicker(l.cfg.HealthReportInterval)
 	defer t.Stop()

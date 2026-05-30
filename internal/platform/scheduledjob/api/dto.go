@@ -95,6 +95,10 @@ type ScheduledJobResponse struct {
 	CreatedBy           *string          `json:"createdBy,omitempty"`
 	UpdatedBy           *string          `json:"updatedBy,omitempty"`
 	Version             int32            `json:"version"`
+	// HasActiveInstance is true when any non-terminal instance
+	// (QUEUED/IN_FLIGHT/DELIVERED) currently exists for this job — drives the
+	// dashboard "currently running" badge. Mirrors the Rust field.
+	HasActiveInstance bool `json:"hasActiveInstance"`
 }
 
 func fromEntity(j *scheduledjob.ScheduledJob) ScheduledJobResponse {
@@ -131,7 +135,15 @@ func fromEntity(j *scheduledjob.ScheduledJob) ScheduledJobResponse {
 	}
 }
 
-// FireNowResponse is the wire shape for POST /api/scheduled-jobs/{id}/fire-now.
+// FireNowRequest is the optional body for POST /api/scheduled-jobs/{id}/fire.
+// A pointer Body makes it optional in huma, so a bodyless fire still works;
+// the correlationId (when supplied) is stamped on the instance + carried in
+// the firing webhook. Mirrors the Rust FireRequest.
+type FireNowRequest struct {
+	CorrelationID *string `json:"correlationId,omitempty"`
+}
+
+// FireNowResponse is the wire shape for POST /api/scheduled-jobs/{id}/fire.
 type FireNowResponse struct {
 	ScheduledJobID string `json:"scheduledJobId"`
 	InstanceID     string `json:"instanceId"`

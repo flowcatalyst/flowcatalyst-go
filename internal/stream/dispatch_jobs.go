@@ -72,7 +72,7 @@ func (p *DispatchJobProjection) step(ctx context.Context, batchSize int) (int, e
 		     mode, dispatch_pool_id, message_group, sequence, timeout_seconds,
 		     status, max_retries, retry_strategy, scheduled_for, expires_at,
 		     attempt_count, last_attempt_at, completed_at, duration_millis, last_error,
-		     idempotency_key, is_completed,
+		     idempotency_key, is_completed, is_terminal,
 		     application, subdomain, aggregate,
 		     created_at, updated_at, projected_at)
 		 SELECT j.id, j.external_id, j.source, j.kind, j.code, j.subject,
@@ -84,7 +84,13 @@ func (p *DispatchJobProjection) step(ctx context.Context, batchSize int) (int, e
 		        j.scheduled_for, j.expires_at,
 		        j.attempt_count, j.last_attempt_at, j.completed_at,
 		        j.duration_millis, j.last_error, j.idempotency_key,
-		        j.status IN ('SUCCESS', 'FAILED', 'IGNORED', 'CANCELLED', 'EXPIRED'),
+		        -- is_completed: the single success terminal (status == COMPLETED).
+		        -- is_terminal: any non-retryable end state. Mirrors the Rust
+		        -- DispatchStatus is_completed / is_terminal() split — the prior
+		        -- code conflated them and used SUCCESS/IGNORED names that Go
+		        -- never writes (Go uses COMPLETED; there is no IGNORED).
+		        j.status = 'COMPLETED',
+		        j.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED'),
 		        split_part(j.code, ':', 1),
 		        NULLIF(split_part(j.code, ':', 2), ''),
 		        NULLIF(split_part(j.code, ':', 3), ''),
@@ -99,6 +105,7 @@ func (p *DispatchJobProjection) step(ctx context.Context, batchSize int) (int, e
 		     duration_millis = EXCLUDED.duration_millis,
 		     last_error = EXCLUDED.last_error,
 		     is_completed = EXCLUDED.is_completed,
+		     is_terminal = EXCLUDED.is_terminal,
 		     updated_at = EXCLUDED.updated_at,
 		     projected_at = NOW()`, ids); err != nil {
 		return 0, fmt.Errorf("insert read: %w", err)

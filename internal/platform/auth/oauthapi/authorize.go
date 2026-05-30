@@ -209,6 +209,15 @@ func maxAgeExceeded(maxAge string, issuedAt time.Time) bool {
 
 // ─── redirect-uri matching (1:1 with Rust) ──────────────────────────────
 
+// MatchesRedirectURI is the exported form of the redirect-uri matcher,
+// used by the OIDC bridge's /auth/oidc/session/end handler to validate a
+// post_logout_redirect_uri against a client's registered whitelist with the
+// exact same rules /oauth/authorize applies to redirect_uri (1:1 with Rust,
+// which shares oauth_api::matches_redirect_uri for both checks).
+func MatchesRedirectURI(uri string, registered []string) bool {
+	return matchesRedirectURI(uri, registered)
+}
+
 func matchesRedirectURI(uri string, registered []string) bool {
 	for _, r := range registered {
 		if r == uri {

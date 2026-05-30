@@ -123,6 +123,43 @@ func (r *Repository) FindWithFilters(ctx context.Context, status, clientID *stri
 	return r.hydrateAll(ctx, bare)
 }
 
+// FindByApplicationCode returns the subscriptions whose application_code
+// matches, hydrated with their event-type bindings and custom config. Used by
+// the SDK sync to scope an application's API/CODE-sourced subscriptions.
+// Mirrors the Rust SubscriptionRepository::find_by_application_code.
+func (r *Repository) FindByApplicationCode(ctx context.Context, appCode string) ([]Subscription, error) {
+	const baseSelect = `SELECT id, code, application_code, name, description, client_id,
+		client_identifier, client_scoped, target, queue, source, status,
+		max_age_seconds, dispatch_pool_id, dispatch_pool_code, delay_seconds, sequence,
+		mode, timeout_seconds, max_retries, service_account_id, data_only,
+		created_at, updated_at, connection_id FROM msg_subscriptions
+		WHERE application_code = $1 ORDER BY code`
+	rows, err := r.pool.Query(ctx, baseSelect, appCode)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var bare []Subscription
+	for rows.Next() {
+		var row dbq.MsgSubscription
+		if err := rows.Scan(
+			&row.ID, &row.Code, &row.ApplicationCode, &row.Name, &row.Description,
+			&row.ClientID, &row.ClientIdentifier, &row.ClientScoped,
+			&row.Target, &row.Queue, &row.Source, &row.Status, &row.MaxAgeSeconds,
+			&row.DispatchPoolID, &row.DispatchPoolCode, &row.DelaySeconds, &row.Sequence,
+			&row.Mode, &row.TimeoutSeconds, &row.MaxRetries, &row.ServiceAccountID,
+			&row.DataOnly, &row.CreatedAt, &row.UpdatedAt, &row.ConnectionID,
+		); err != nil {
+			return nil, err
+		}
+		bare = append(bare, *rowToSubscription(row))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return r.hydrateAll(ctx, bare)
+}
+
 // Persist implements usecasepgx.Persist[Subscription]. Replaces the
 // junction-table rows (event_types, custom_config) wholesale.
 func (r *Repository) Persist(ctx context.Context, s *Subscription, tx *usecasepgx.DbTx) error {

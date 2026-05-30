@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -64,11 +65,11 @@ type ServerConfig struct {
 // Fields are public so callers can wire a /health, /ready, /metrics
 // surface without depending on private state.
 type Server struct {
-	Cfg       ServerConfig
-	Notifier  *Notifier
-	Mediator  Mediator
-	Breakers  *BreakerRegistry
-	Tracker   *InFlightTracker
+	Cfg          ServerConfig
+	Notifier     *Notifier
+	Mediator     Mediator
+	Breakers     *BreakerRegistry
+	Tracker      *InFlightTracker
 	Manager      *Manager
 	Warnings     *WarningService
 	Health       *HealthService
@@ -88,7 +89,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		cfg.DrainTimeout = 60 * time.Second
 	}
 	if cfg.ConfigPollInterval == 0 {
-		cfg.ConfigPollInterval = 30 * time.Second
+		cfg.ConfigPollInterval = 300 * time.Second // 5m, matching the Rust/Java default
 	}
 	if cfg.InFlightReapMaxAge == 0 {
 		cfg.InFlightReapMaxAge = 15 * time.Minute
@@ -97,14 +98,15 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		cfg.BreakerIdleMaxAge = time.Hour
 	}
 
+	breakers := NewBreakerRegistry(DefaultBreakerConfig())
 	s := &Server{
 		Cfg:      cfg,
 		Notifier: NewNotifier(cfg.NotifyWebhookURL, 20, 10*time.Second),
-		Mediator: pickMediator(cfg.DevMode),
-		Breakers: NewBreakerRegistry(DefaultBreakerConfig()),
+		Mediator: pickMediator(cfg.DevMode, breakers),
+		Breakers: breakers,
 		Tracker:  NewInFlightTracker(),
 	}
-	s.Manager = NewManager(s.Mediator, s.Breakers, s.Tracker)
+	s.Manager = NewManager(s.Mediator, s.Tracker)
 	s.BrokerStats = NewCachedBrokerStats(s.Manager)
 	if cfg.ConfigURL != "" {
 		s.ConfigSource = NewConfigSource(cfg.ConfigURL)
@@ -116,8 +118,19 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	// Notifier so the webhook path stays consistent.
 	s.Warnings = NewWarningService(DefaultWarningServiceConfig())
 	s.Warnings.SetNotifier(s.Notifier)
+	// Surface mediator config-error warnings (400/401/403/404, 501→Critical) on
+	// /warnings and into health. Opt-in setter avoids a constructor dependency.
+	if hm, ok := s.Mediator.(*HTTPMediator); ok {
+		hm.SetWarnings(s.Warnings)
+	}
+	// Surface manager routing/capacity warnings (unknown pool_code, all-pools-full).
+	s.Manager.SetWarnings(s.Warnings)
 	s.Health = NewHealthService(DefaultHealthServiceConfig(), s.Warnings)
 	s.Lifecycle = NewLifecycleManager(DefaultLifecycleConfig(), s.Warnings, s.Health)
+	// The Manager owns the consumer poll loops, so it is the consumer-restart
+	// source; the lifecycle consumer-health tick restarts any stalled loop.
+	s.Lifecycle.SetConsumerRestarter(s.Manager)
+	s.Lifecycle.SetPoolStatsProvider(s.Manager)
 
 	if cfg.StandbyEnabled {
 		ecfg := common.NewLeaderElectionConfig(cfg.StandbyRedisURL)
@@ -251,6 +264,10 @@ func (s *Server) Run(ctx context.Context) error {
 // (entries older than InFlightReapMaxAge) and the circuit-breaker
 // registry (idle entries older than BreakerIdleMaxAge). Mirrors the
 // Rust stale-entry reaper in lifecycle.rs (5 min cadence).
+// inFlightMemoryWarnThreshold mirrors the Rust memory-health monitor: warn when
+// the in-flight tracker grows past this, signalling a possible callback leak.
+const inFlightMemoryWarnThreshold = 10000
+
 func (s *Server) reapInFlight(ctx context.Context) {
 	tick := time.NewTicker(5 * time.Minute)
 	defer tick.Stop()
@@ -265,15 +282,22 @@ func (s *Server) reapInFlight(ctx context.Context) {
 			if n := s.Breakers.Evict(s.Cfg.BreakerIdleMaxAge); n > 0 {
 				slog.Info("router evicted idle circuit breakers", "count", n)
 			}
+			// Memory-health: warn when the in-flight tracker grows past the
+			// threshold — a possible callback leak. Mirrors the Rust memory
+			// monitor (lifecycle.rs); piggybacks on this reaper's tick.
+			if n := s.Tracker.Count(); n > inFlightMemoryWarnThreshold {
+				s.Warnings.Add(WarningCategoryResource, WarningError,
+					fmt.Sprintf("in-flight tracker is large (%d entries) - possible leak", n), "router")
+			}
 		}
 	}
 }
 
-func pickMediator(devMode bool) Mediator {
+func pickMediator(devMode bool, breakers *BreakerRegistry) Mediator {
 	if devMode {
-		return NewHTTPMediator(DevMediatorConfig())
+		return NewHTTPMediator(DevMediatorConfig(), breakers)
 	}
-	return NewHTTPMediator(DefaultMediatorConfig())
+	return NewHTTPMediator(DefaultMediatorConfig(), breakers)
 }
 
 // gateOnLeadership starts the pool config watcher only when this
@@ -343,4 +367,3 @@ func drain(ctx context.Context, tracker *InFlightTracker) error {
 		}
 	}
 }
-

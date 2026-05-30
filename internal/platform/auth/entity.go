@@ -54,8 +54,12 @@ type OAuthClient struct {
 	// decrypts and compares; nil for PUBLIC. Set via rotate-secret.
 	SecretRef    *string  `json:"-"`
 	RedirectURIs []string `json:"redirectUris"`
-	GrantTypes   []string `json:"grantTypes"` // "authorization_code", "client_credentials", "refresh_token"
-	Scopes       []string `json:"scopes"`
+	// PostLogoutRedirectURIs is the OIDC RP-Initiated Logout whitelist
+	// (oauth_client_post_logout_redirect_uris). /auth/oidc/session/end
+	// validates a supplied post_logout_redirect_uri against this list.
+	PostLogoutRedirectURIs []string `json:"postLogoutRedirectUris"`
+	GrantTypes             []string `json:"grantTypes"` // "authorization_code", "client_credentials", "refresh_token"
+	Scopes                 []string `json:"scopes"`
 	// PKCERequired gates whether /oauth/authorize demands a code_challenge.
 	// Maps to oauth_clients.pkce_required (DEFAULT TRUE).
 	PKCERequired bool      `json:"pkceRequired"`
@@ -72,17 +76,18 @@ func (c OAuthClient) IDStr() string { return c.ID }
 func NewOAuthClient(clientID, name string, t OAuthClientType) *OAuthClient {
 	now := time.Now().UTC()
 	return &OAuthClient{
-		ID:           tsid.Generate(tsid.OAuthClient),
-		ClientID:     clientID,
-		ClientName:   name,
-		ClientType:   t,
-		RedirectURIs: []string{},
-		GrantTypes:   []string{},
-		Scopes:       []string{},
-		PKCERequired: true,
-		Active:       true,
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		ID:                     tsid.Generate(tsid.OAuthClient),
+		ClientID:               clientID,
+		ClientName:             name,
+		ClientType:             t,
+		RedirectURIs:           []string{},
+		PostLogoutRedirectURIs: []string{},
+		GrantTypes:             []string{},
+		Scopes:                 []string{},
+		PKCERequired:           true,
+		Active:                 true,
+		CreatedAt:              now,
+		UpdatedAt:              now,
 	}
 }
 

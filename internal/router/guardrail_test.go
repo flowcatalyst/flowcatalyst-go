@@ -1,0 +1,280 @@
+package router
+
+// Guardrail suite for the message router. Run with: go test -race ./internal/router/ -run Guardrail
+//
+// These encode the operational contract the Go router must preserve (the rules
+// the Rust implementation defines) and the concurrency invariants Go cannot
+// enforce at compile time. The breaker now lives in the mediator, so the
+// breaker-accounting guardrails target that layer; the pool guardrails assert
+// resolution always fires (incl. panic) and that concurrent submit is race-free
+// (`-race` turns a dropped lock into a hard failure here).
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/flowcatalyst/flowcatalyst-go/internal/common"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/queue"
+)
+
+// grConsumer is a thread-safe fake queue.Consumer that records terminal actions.
+type grConsumer struct {
+	id            string
+	acks          atomic.Int64
+	nacks         atomic.Int64
+	defers        atomic.Int64
+	lastNackDelay atomic.Pointer[uint32]
+}
+
+func (c *grConsumer) Identifier() string { return c.id }
+func (c *grConsumer) Poll(ctx context.Context, max uint32) ([]common.QueuedMessage, error) {
+	return nil, nil
+}
+func (c *grConsumer) Ack(ctx context.Context, receipt string) error { c.acks.Add(1); return nil }
+func (c *grConsumer) Nack(ctx context.Context, receipt string, delay *uint32) error {
+	c.nacks.Add(1)
+	c.lastNackDelay.Store(delay)
+	return nil
+}
+func (c *grConsumer) Defer(ctx context.Context, receipt string, delay *uint32) error {
+	c.defers.Add(1)
+	return nil
+}
+func (c *grConsumer) ExtendVisibility(ctx context.Context, receipt string, sec uint32) error {
+	return nil
+}
+func (c *grConsumer) Healthy() bool                                       { return true }
+func (c *grConsumer) Stop()                                               {}
+func (c *grConsumer) Metrics(ctx context.Context) (*queue.Metrics, error) { return nil, nil }
+func (c *grConsumer) Counters() *queue.Metrics                            { return nil }
+func (c *grConsumer) total() int64                                        { return c.acks.Load() + c.nacks.Load() + c.defers.Load() }
+
+// grMediator is a Mediator that returns a fixed outcome (or panics). It does NOT
+// consult a breaker — breaker behaviour is tested against the real HTTPMediator.
+type grMediator struct {
+	outcome  common.MediationOutcome
+	panicMsg string
+	called   atomic.Bool
+}
+
+func (m *grMediator) Mediate(ctx context.Context, msg *common.Message) common.MediationOutcome {
+	m.called.Store(true)
+	if m.panicMsg != "" {
+		panic(m.panicMsg)
+	}
+	return m.outcome
+}
+
+func grPool(med Mediator, c queue.Consumer) *Pool {
+	cfg := common.PoolConfig{Code: "TEST", Concurrency: 8}
+	return NewPool(cfg, med, NewInFlightTracker(), func(string) queue.Consumer { return c })
+}
+
+func grMsg(id, endpoint string) common.QueuedMessage {
+	return common.QueuedMessage{
+		Message:         common.Message{ID: id, MediationTarget: endpoint, DispatchMode: common.DispatchImmediate},
+		ReceiptHandle:   "rh-" + id,
+		BrokerMessageID: "bk-" + id,
+		QueueIdentifier: "q1",
+	}
+}
+
+func grWaitFor(t *testing.T, cond func() bool, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !cond() {
+		t.Fatalf("condition not met within %s", timeout)
+	}
+}
+
+// --- Pool: resolution always fires on every path ---
+
+func TestGuardrail_ResolutionOnSuccess(t *testing.T) {
+	c := &grConsumer{id: "q1"}
+	p := grPool(&grMediator{outcome: common.Success()}, c)
+	p.processOne(context.Background(), grMsg("evt_ok", "http://t/ok"), false)
+	if c.acks.Load() != 1 || c.nacks.Load() != 0 || c.defers.Load() != 0 {
+		t.Fatalf("success must ACK exactly once; got acks=%d nacks=%d defers=%d",
+			c.acks.Load(), c.nacks.Load(), c.defers.Load())
+	}
+}
+
+func TestGuardrail_ResolutionOnProcessError(t *testing.T) {
+	c := &grConsumer{id: "q1"}
+	p := grPool(&grMediator{outcome: common.ErrorProcess(30, "5xx")}, c)
+	p.processOne(context.Background(), grMsg("evt_5xx", "http://t/5xx"), false)
+	if c.nacks.Load() != 1 {
+		t.Fatalf("process error must NACK exactly once; got nacks=%d", c.nacks.Load())
+	}
+	if d := c.lastNackDelay.Load(); d == nil || *d != 30 {
+		t.Fatalf("process error NACK delay must be 30; got %v", d)
+	}
+}
+
+func TestGuardrail_ResolutionOnCircuitOpen(t *testing.T) {
+	// The mediator now owns the breaker and returns MediationCircuitOpen when
+	// open; the pool must DEFER (not NACK, not ACK) such a message.
+	c := &grConsumer{id: "q1"}
+	p := grPool(&grMediator{outcome: common.CircuitOpen(5)}, c)
+	p.processOne(context.Background(), grMsg("evt_cb", "http://t/cb"), false)
+	if c.defers.Load() != 1 || c.nacks.Load() != 0 || c.acks.Load() != 0 {
+		t.Fatalf("circuit-open must DEFER exactly once; got acks=%d nacks=%d defers=%d",
+			c.acks.Load(), c.nacks.Load(), c.defers.Load())
+	}
+}
+
+func TestGuardrail_ResolutionOnPanic(t *testing.T) {
+	// Even on a panic mid-mediation the message must be resolved (NACK) and the
+	// worker must not crash the process. processOne is invoked synchronously and
+	// we recover at the call site so a regression reports a clean failure rather
+	// than aborting the run.
+	c := &grConsumer{id: "q1"}
+	p := grPool(&grMediator{panicMsg: "boom"}, c)
+	func() {
+		defer func() { _ = recover() }()
+		p.processOne(context.Background(), grMsg("evt_panic", "http://t/panic"), false)
+	}()
+	if c.total() != 1 {
+		t.Fatalf("a panic mid-mediation must still resolve the message (NACK); got %d resolutions", c.total())
+	}
+}
+
+// --- Pool (marquee): the data-race surface under contention ---
+
+// Hammer submit() from many goroutines across both dispatch paths (IMMEDIATE
+// goroutine-per-message + ordered per-group drainers) and overlapping batch
+// groups. Exercises groupQs (p.mu), the batch-group maps (bgMu), the swappable
+// semaphore and the atomic counters concurrently. Under -race, any future edit
+// that drops a lock fails here (or panics on concurrent map write). Invariant:
+// every submitted message is resolved exactly once (no loss, no double-resolve).
+func TestGuardrail_ConcurrentSubmitNoRaceAndResolvesEach(t *testing.T) {
+	const n = 600
+	c := &grConsumer{id: "q1"}
+	p := grPool(&grMediator{outcome: common.Success()}, c)
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			m := grMsg(fmt.Sprintf("evt_%d", i), "http://t/x")
+			m.BatchID = fmt.Sprintf("b_%d", i%8)
+			if i%2 == 0 {
+				g := fmt.Sprintf("grp_%d", i%5)
+				m.Message.MessageGroupID = &g
+				m.Message.DispatchMode = common.DispatchMode("BLOCK_ON_ERROR") // ordered path
+			}
+			p.submit(ctx, m)
+		}(i)
+	}
+	wg.Wait()
+
+	grWaitFor(t, func() bool { return c.total() == n }, 10*time.Second)
+	if c.total() != int64(n) {
+		t.Fatalf("every message must resolve exactly once; got %d of %d", c.total(), n)
+	}
+}
+
+// --- Mediator: breaker accounting now lives here ---
+
+// A 4xx means the endpoint is reachable, so it must record a circuit-breaker
+// SUCCESS (it must not trip the breaker, and must let an open breaker recover).
+// Centralising the recording in the mediator removes the bug class where a pool
+// switch arm forgot to record.
+func TestGuardrail_BreakerRecordsSuccessOn4xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	br := NewBreakerRegistry(DefaultBreakerConfig())
+	med := NewHTTPMediator(DevMediatorConfig(), br)
+	defer med.Close()
+
+	out := med.Mediate(context.Background(),
+		&common.Message{ID: "evt_4xx", MediationType: common.MediationTypeHTTP, MediationTarget: srv.URL})
+
+	if out.Result != common.MediationErrorConfig {
+		t.Fatalf("404 must classify as ErrorConfig; got %v", out.Result)
+	}
+	if s := br.Get(srv.URL).Stats().Successes; s != 1 {
+		t.Fatalf("ErrorConfig (4xx) must record a circuit-breaker success (reachable); got successes=%d", s)
+	}
+}
+
+// An open breaker short-circuits in the mediator: no HTTP is attempted and a
+// MediationCircuitOpen outcome is returned for the pool to DEFER.
+func TestGuardrail_MediatorShortCircuitsWhenOpen(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	br := NewBreakerRegistry(DefaultBreakerConfig())
+	for i := 0; i < 10; i++ { // trip: 10 failures @ 100% >= 0.5 threshold, MinCalls 10
+		br.Get(srv.URL).RecordFailure()
+	}
+	med := NewHTTPMediator(DevMediatorConfig(), br)
+	defer med.Close()
+
+	out := med.Mediate(context.Background(),
+		&common.Message{ID: "evt_open", MediationType: common.MediationTypeHTTP, MediationTarget: srv.URL})
+
+	if out.Result != common.MediationCircuitOpen {
+		t.Fatalf("open breaker must yield MediationCircuitOpen; got %v", out.Result)
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("open breaker must NOT hit the endpoint; got %d hits", hits.Load())
+	}
+}
+
+// Config-class responses (400/401/403/404 → Error, 501 → Critical) must surface
+// as Configuration warnings on the WarningService when one is wired, so they
+// appear on /warnings and a 501 degrades health.
+func TestGuardrail_ConfigErrorsSurfaceAsWarnings(t *testing.T) {
+	cases := []struct {
+		status int
+		sev    WarningSeverity
+	}{
+		{http.StatusNotFound, WarningError},
+		{http.StatusNotImplemented, WarningCritical},
+	}
+	for _, tc := range cases {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(tc.status)
+		}))
+		ws := NewWarningService(DefaultWarningServiceConfig())
+		med := NewHTTPMediator(DevMediatorConfig(), NewBreakerRegistry(DefaultBreakerConfig()))
+		med.SetWarnings(ws)
+
+		med.Mediate(context.Background(),
+			&common.Message{ID: "m", MediationType: common.MediationTypeHTTP, MediationTarget: srv.URL})
+
+		found := false
+		for _, w := range ws.BySeverity(tc.sev) {
+			if w.Category == WarningCategoryConfiguration {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("status %d must record a %s Configuration warning", tc.status, tc.sev)
+		}
+		med.Close()
+		srv.Close()
+	}
+}

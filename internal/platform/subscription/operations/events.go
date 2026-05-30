@@ -13,6 +13,7 @@ const (
 	SubscriptionDeletedType = "platform:admin:subscription:deleted"
 	SubscriptionPausedType  = "platform:admin:subscription:paused"
 	SubscriptionResumedType = "platform:admin:subscription:resumed"
+	SubscriptionsSyncedType = "platform:admin:subscription:synced"
 	Source                  = "platform:admin"
 )
 
@@ -140,4 +141,37 @@ func (e SubscriptionResumed) ToDataJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		SubscriptionID string `json:"subscriptionId"`
 	}{e.SubscriptionID})
+}
+
+// SubscriptionsSynced is the rollup emitted by the SDK app-scoped
+// subscription sync (SyncSubscriptions). Mirrors the Rust SubscriptionsSynced
+// event.
+type SubscriptionsSynced struct {
+	Metadata        usecase.EventMetadata
+	ApplicationCode string
+	Created         uint32
+	Updated         uint32
+	Deleted         uint32
+	SyncedCodes     []string
+}
+
+func (e SubscriptionsSynced) EventID() string       { return e.Metadata.EventID }
+func (e SubscriptionsSynced) EventType() string     { return SubscriptionsSyncedType }
+func (e SubscriptionsSynced) SpecVersion() string   { return "1.0" }
+func (e SubscriptionsSynced) Source() string        { return Source }
+func (e SubscriptionsSynced) Subject() string       { return "platform.subscriptions." + e.ApplicationCode }
+func (e SubscriptionsSynced) Time() time.Time       { return e.Metadata.OccurredAt }
+func (e SubscriptionsSynced) PrincipalID() string   { return e.Metadata.PrincipalID }
+func (e SubscriptionsSynced) CorrelationID() string { return e.Metadata.CorrelationID }
+func (e SubscriptionsSynced) CausationID() string   { return e.Metadata.CausationID }
+func (e SubscriptionsSynced) ExecutionID() string   { return e.Metadata.ExecutionID }
+func (e SubscriptionsSynced) MessageGroup() string  { return "platform:subscriptions" }
+func (e SubscriptionsSynced) ToDataJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		ApplicationCode string   `json:"applicationCode"`
+		Created         uint32   `json:"created"`
+		Updated         uint32   `json:"updated"`
+		Deleted         uint32   `json:"deleted"`
+		SyncedCodes     []string `json:"syncedCodes"`
+	}{e.ApplicationCode, e.Created, e.Updated, e.Deleted, e.SyncedCodes})
 }

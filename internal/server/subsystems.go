@@ -15,15 +15,18 @@ import (
 	"github.com/flowcatalyst/flowcatalyst-go/internal/common"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/mcp"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/outbox"
+	outboxmongo "github.com/flowcatalyst/flowcatalyst-go/internal/outbox/mongo"
 	outboxpg "github.com/flowcatalyst/flowcatalyst-go/internal/outbox/postgres"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/bridge"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/payload"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/scheduledjob"
+	sjscheduler "github.com/flowcatalyst/flowcatalyst-go/internal/platform/scheduledjob/scheduler"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/scheduler"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/webauthn"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/queue"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/router"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/standby"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/stream"
-	fcsdkclient "github.com/flowcatalyst/flowcatalyst-go/pkg/fcsdk/client"
 
 	// Queue backend registrations needed by router.
 	_ "github.com/flowcatalyst/flowcatalyst-go/internal/queue/nats"
@@ -44,6 +47,54 @@ func StartScheduler(ctx context.Context, pool *pgxpool.Pool, _ EnvCfg) {
 	s := scheduler.New(cfg, pool, NoopPublisher{}, "fc-dispatch-hmac-secret-todo")
 	s.Run(ctx)
 	slog.Info("scheduler stopped")
+}
+
+// StartScheduledJobScheduler runs the scheduled-job cron + dispatch engine
+// (poller + dispatcher). Leader-gated: when standby is enabled only the lock
+// holder fires, because the loops intentionally have no SELECT … FOR UPDATE
+// SKIP LOCKED claim (mirrors the Rust single-active-replica design). Blocks
+// until ctx is cancelled.
+//
+// (The dispatch-job scheduler — StartScheduler — is deliberately NOT
+// leader-gated: its poller claims rows with FOR UPDATE SKIP LOCKED, so
+// concurrent replicas are already safe and gating would only cut throughput.)
+func StartScheduledJobScheduler(ctx context.Context, pool *pgxpool.Pool, cfg EnvCfg) {
+	isLeader := newLeaderGate(ctx, cfg, "scheduled-job")
+	jobs := scheduledjob.NewRepository(pool)
+	instances := scheduledjob.NewInstanceRepository(pool)
+	svc := sjscheduler.NewService(sjscheduler.ConfigFromEnv(), jobs, instances, isLeader)
+	svc.Run(ctx)
+}
+
+// newLeaderGate returns an IsLeader predicate for a leader-only background
+// subsystem. When standby is disabled it always returns true (single
+// instance). When enabled it runs a dedicated Redis election on a
+// subsystem-suffixed lock key, so it elects independently of the router's own
+// election (sharing the router's exact key with a different instance id would
+// starve this gate). The election is stopped when ctx is cancelled.
+func newLeaderGate(ctx context.Context, cfg EnvCfg, subsystem string) func() bool {
+	if !cfg.StandbyEnabled {
+		return func() bool { return true }
+	}
+	ecfg := common.NewLeaderElectionConfig(cfg.StandbyRedisURL)
+	ecfg.Enabled = true
+	ecfg.LockKey = cfg.StandbyLockKey + ":" + subsystem
+	el, err := standby.New(ecfg)
+	if err != nil {
+		slog.Error("leader election init failed; running un-gated", "subsystem", subsystem, "err", err)
+		return func() bool { return true }
+	}
+	if err := el.Start(ctx); err != nil {
+		slog.Error("leader election start failed; running un-gated", "subsystem", subsystem, "err", err)
+		return func() bool { return true }
+	}
+	go func() {
+		<-ctx.Done()
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = el.Stop(shutCtx)
+	}()
+	return el.IsLeader
 }
 
 // StartStreamProcessor runs the CQRS projections (events + dispatch
@@ -84,23 +135,44 @@ func StartStreamProcessorWithHealth(ctx context.Context, pool *pgxpool.Pool, cfg
 		return p
 	}
 
+	// projCfg derives a per-projection config from the base (global) config,
+	// honouring an optional per-projection batch-size override env var.
+	projCfg := func(batchEnv string) stream.ProjectorConfig {
+		c := pcfg
+		if b := envInt(batchEnv, 0); b > 0 {
+			c.BatchSize = b
+		}
+		return c
+	}
+
 	if cfg.StreamEventsEnabled {
 		p := registerProjector("event_projection",
-			stream.NewEventProjection(pool).Projector(pcfg))
+			stream.NewEventProjection(pool).Projector(projCfg("FC_STREAM_EVENTS_BATCH_SIZE")))
 		launch("event_projection", p.Run)
 	}
 	if cfg.StreamDispatchJobsEnabled {
 		p := registerProjector("dispatch_job_projection",
-			stream.NewDispatchJobProjection(pool).Projector(pcfg))
+			stream.NewDispatchJobProjection(pool).Projector(projCfg("FC_STREAM_DISPATCH_JOBS_BATCH_SIZE")))
 		launch("dispatch_job_projection", p.Run)
 	}
 	if cfg.StreamFanOutEnabled {
 		p := registerProjector("event_fan_out",
-			stream.NewFanOut(pool).Projector(pcfg))
+			stream.NewFanOut(pool).Projector(projCfg("FC_STREAM_FAN_OUT_BATCH_SIZE")))
 		launch("event_fan_out", p.Run)
 	}
 	if cfg.StreamPartitionsEnabled {
+		// The projections are multi-replica safe (FOR UPDATE SKIP LOCKED
+		// claims), so they are intentionally NOT leader-gated — concurrent
+		// replicas just share the work. The partition manager does DDL
+		// (CREATE/DROP), so it is leader-gated to avoid needless churn,
+		// matching the Rust spawn_stream_processor leadership gate.
 		pm := stream.NewPartitionManager(pool)
+		pm.Config = stream.PartitionManagerConfig{
+			MonthsForward: cfg.StreamPartitionMonthsForward,
+			RetentionDays: cfg.StreamPartitionRetentionDays,
+			TickInterval:  time.Duration(cfg.StreamPartitionTickHours) * time.Hour,
+		}
+		pm.IsLeader = newLeaderGate(ctx, cfg, "stream-partition-manager")
 		if healths != nil {
 			h := stream.NewHealth("partition_manager")
 			pm.Health = h
@@ -113,18 +185,27 @@ func StartStreamProcessorWithHealth(ctx context.Context, pool *pgxpool.Pool, cfg
 	slog.Info("stream processor stopped")
 }
 
-// StartOutboxProcessor runs the consumer-app SDK outbox poller against
-// the same Postgres pool that hosts the platform. The standalone
-// cmd/fc-outbox-processor binary remains the home for the (forthcoming)
-// sqlite/mysql/mongo backends — fc-server only supports the Postgres
-// path so it can reuse the shared pool.
+// StartOutboxProcessor runs the consumer-app SDK outbox poller. The backend
+// is selected by FC_OUTBOX_BACKEND: "postgres" (default) reuses the shared
+// pool; "mongo" dials FC_OUTBOX_MONGO_URI. Blocks until ctx is cancelled.
+//
+// The processor is leader-gated (newLeaderGate): when standby is enabled only
+// the leader polls — the Mongo backend has no atomic claim, so a single
+// active poller avoids double-claims. Mirrors the Rust outbox leadership gate.
 func StartOutboxProcessor(ctx context.Context, pool *pgxpool.Pool, cfg EnvCfg) {
 	if cfg.OutboxPlatformURL == "" {
-		slog.Error("outbox processor enabled but FC_OUTBOX_PLATFORM_URL not set; skipping")
+		slog.Error("outbox processor enabled but FC_OUTBOX_PLATFORM_URL / FC_OUTBOX_API_URL not set; skipping")
 		return
 	}
 
-	repo := outboxpg.New(pool)
+	repo, closeRepo, err := buildOutboxRepo(ctx, pool, cfg)
+	if err != nil {
+		slog.Error("outbox backend init failed", "backend", cfg.OutboxBackend, "err", err)
+		return
+	}
+	if closeRepo != nil {
+		defer closeRepo()
+	}
 	if err := repo.InitSchema(ctx); err != nil {
 		slog.Error("outbox init schema failed", "err", err)
 		return
@@ -142,11 +223,40 @@ func StartOutboxProcessor(ctx context.Context, pool *pgxpool.Pool, cfg EnvCfg) {
 	if cfg.OutboxPollIntervalMS > 0 {
 		pcfg.PollInterval = time.Duration(cfg.OutboxPollIntervalMS) * time.Millisecond
 	}
+	if cfg.OutboxMaxConcurrentGroups > 0 {
+		pcfg.MaxConcurrentGroups = cfg.OutboxMaxConcurrentGroups
+	}
+	pcfg.BlockOnError = cfg.OutboxBlockOnError
 
 	p := outbox.NewProcessor(pcfg, repo)
-	slog.Info("outbox processor started", "platform_url", cfg.OutboxPlatformURL)
+	p.IsLeader = newLeaderGate(ctx, cfg, "outbox")
+	slog.Info("outbox processor started", "platform_url", cfg.OutboxPlatformURL, "backend", cfg.OutboxBackend)
 	p.Run(ctx)
 	slog.Info("outbox processor stopped")
+}
+
+// buildOutboxRepo selects the outbox backend. Returns an optional cleanup
+// func (non-nil for Mongo, which owns a client connection).
+func buildOutboxRepo(ctx context.Context, pool *pgxpool.Pool, cfg EnvCfg) (outbox.Repository, func(), error) {
+	switch cfg.OutboxBackend {
+	case "mongo", "mongodb":
+		if cfg.OutboxMongoURI == "" {
+			return nil, nil, fmt.Errorf("FC_OUTBOX_BACKEND=mongo requires FC_OUTBOX_MONGO_URI")
+		}
+		repo, err := outboxmongo.Connect(ctx, cfg.OutboxMongoURI, cfg.OutboxMongoDB)
+		if err != nil {
+			return nil, nil, err
+		}
+		return repo, func() {
+			cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = repo.Close(cctx)
+		}, nil
+	case "", "postgres", "postgresql":
+		return outboxpg.New(pool), nil, nil
+	default:
+		return nil, nil, fmt.Errorf("unknown FC_OUTBOX_BACKEND %q (want postgres|mongo)", cfg.OutboxBackend)
+	}
 }
 
 // StartMCP runs the read-only MCP HTTP server on its own port.
@@ -159,19 +269,35 @@ func StartMCP(ctx context.Context, cfg EnvCfg) {
 	if platformURL == "" {
 		platformURL = fmt.Sprintf("http://localhost:%d", cfg.APIPort)
 	}
-	pc := fcsdkclient.New(platformURL,
-		fcsdkclient.WithToken(cfg.MCPClientSecret),
-		fcsdkclient.WithTimeout(10*time.Second),
-	)
-	srv := mcp.New(pc)
+	// Build the MCP server from resolved config: client_id+secret →
+	// client_credentials token manager; secret-only → static bearer; neither →
+	// unauthenticated (localhost in-process).
+	mcfg := mcp.Config{
+		BaseURL:      platformURL,
+		ClientID:     cfg.MCPClientID,
+		ClientSecret: cfg.MCPClientSecret,
+	}
+	// When no creds came from the env, fall back to the fc-dev-bootstrapped
+	// credentials file (~/.cache/flowcatalyst-dev/mcp-credentials.json) so
+	// `fc-dev start --mcp` authenticates via client_credentials like the
+	// standalone `fc-dev mcp` — otherwise the in-process tools 403 against the
+	// auth-gated platform. The bootstrap runs before StartMCP, so the file
+	// exists by now. BaseURL stays the local listener.
+	if mcfg.ClientID == "" && mcfg.ClientSecret == "" {
+		if fileCfg := mcp.LoadConfig(); fileCfg.ClientID != "" || fileCfg.ClientSecret != "" {
+			mcfg.ClientID = fileCfg.ClientID
+			mcfg.ClientSecret = fileCfg.ClientSecret
+		}
+	}
+	srv := mcp.New(mcfg)
 
 	r := chi.NewRouter()
-	r.Post("/mcp", srv.HandleHTTP)
+	r.Handle("/mcp", srv.HTTPHandler()) // streamable-HTTP: POST + GET(SSE) + DELETE
 	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	addr := fmt.Sprintf(":%d", cfg.MCPPort)
+	addr := fmt.Sprintf("%s:%d", cfg.MCPBind, cfg.MCPPort)
 	httpSrv := &http.Server{Addr: addr, Handler: r, ReadHeaderTimeout: 5 * time.Second}
 	errCh := make(chan error, 1)
 	go func() {

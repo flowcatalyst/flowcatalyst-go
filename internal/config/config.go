@@ -108,7 +108,10 @@ func Load(path string) (*AppConfig, error) {
 func defaults() *AppConfig {
 	return &AppConfig{
 		HTTP: HTTPConfig{
-			APIPort:     3000,
+			// 8080 is the single canonical default (matches internal/server
+			// envcfg + cmd/fc-dev + Docker EXPOSE). We do not chase Rust's
+			// 3000; FC_API_PORT/PORT overrides it.
+			APIPort:     8080,
 			MetricsPort: 9090,
 			BindAddr:    "0.0.0.0",
 		},

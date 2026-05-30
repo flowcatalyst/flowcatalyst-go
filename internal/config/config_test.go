@@ -14,7 +14,7 @@ import (
 func TestDefaultsAreApplied(t *testing.T) {
 	c, err := config.Load("")
 	require.NoError(t, err)
-	assert.Equal(t, uint16(3000), c.HTTP.APIPort)
+	assert.Equal(t, uint16(8080), c.HTTP.APIPort)
 	assert.Equal(t, uint16(9090), c.HTTP.MetricsPort)
 	assert.Equal(t, "0.0.0.0", c.HTTP.BindAddr)
 	assert.Equal(t, "postgres", c.Outbox.DBType)

@@ -46,6 +46,8 @@ import (
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/loginattempt"
 	loginattemptapi "github.com/flowcatalyst/flowcatalyst-go/internal/platform/loginattempt/api"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/openapispecs"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/passwordreset"
+	passwordresetapi "github.com/flowcatalyst/flowcatalyst-go/internal/platform/passwordreset/api"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/platformconfig"
 	platformconfigapi "github.com/flowcatalyst/flowcatalyst-go/internal/platform/platformconfig/api"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/principal"
@@ -57,6 +59,7 @@ import (
 	roleapi "github.com/flowcatalyst/flowcatalyst-go/internal/platform/role/api"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/scheduledjob"
 	scheduledjobapi "github.com/flowcatalyst/flowcatalyst-go/internal/platform/scheduledjob/api"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/sdksync"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/serviceaccount"
 	serviceaccountapi "github.com/flowcatalyst/flowcatalyst-go/internal/platform/serviceaccount/api"
 	bff "github.com/flowcatalyst/flowcatalyst-go/internal/platform/shared/bff"
@@ -152,6 +155,12 @@ func WirePlatform(r chi.Router, pool *pgxpool.Pool, cfg EnvCfg) error {
 	// /oauth/{token,authorize} per-client_id (+ per-IP via middleware).
 	rlStore := ratelimit.Build(context.Background(), pool)
 	rlPolicies := ratelimit.PoliciesFromEnv()
+	// In-memory per-instance governors layered in front of the distributed
+	// store on /oauth/token (defence-in-depth; 1:1 with Rust's
+	// rate_limit_middleware.rs). They shed a local flood before the network
+	// round-trip; the distributed store remains the cluster-wide ceiling.
+	oauthTokenIPGov := ratelimit.NewGovernor(ratelimit.OAuthTokenIPGovernorFromEnv())
+	oauthTokenClientGov := ratelimit.NewGovernor(ratelimit.OAuthTokenClientGovernorFromEnv())
 	oauthTokenEP := &oauthapi.State{
 		OAuthClients:      authRepo.OAuthClients,
 		Principals:        principalRepo,
@@ -164,6 +173,7 @@ func WirePlatform(r chi.Router, pool *pgxpool.Pool, cfg EnvCfg) error {
 		LoginAttempts:     loginAttemptRepo,
 		RateLimit:         rlStore,
 		RateLimitPolicies: rlPolicies,
+		ClientGovernor:    oauthTokenClientGov,
 		// /oauth/authorize treats an invalid/absent session as
 		// redirect-to-login, so it validates the session cookie itself
 		// (it's mounted outside the rejecting auth middleware).
@@ -212,6 +222,10 @@ func WirePlatform(r chi.Router, pool *pgxpool.Pool, cfg EnvCfg) error {
 		CookieSecure:      !cfg.AuthAllowTestHeaders,
 		LoginAttempts:     loginAttemptRepo,
 		BackoffPolicy:     loginbackoff.PolicyFromEnv(),
+		// /auth/refresh shares the OAuth refresh-token store + access-token
+		// signer so a token issued via either path rotates identically.
+		RefreshTokens: oauthTokenEP.RefreshTokens,
+		Auth:          authSvc,
 	})
 	loginEP.RegisterPublicRoutes(r)
 
@@ -219,6 +233,16 @@ func WirePlatform(r chi.Router, pool *pgxpool.Pool, cfg EnvCfg) error {
 	// (login-theme branding, platform feature flags). Mounted outside
 	// the auth middleware for the same reason as the login surface.
 	publicapi.New(platformConfigRepo).RegisterRoutes(r)
+
+	// Unauthenticated password-reset flow (request/validate/confirm). Public
+	// like /auth/login. Emailer is nil until a mailer is wired — tokens are
+	// created but not delivered (best-effort, matching Rust on email failure).
+	passwordresetapi.RegisterRoutes(r, &passwordresetapi.State{
+		Principals:      principalRepo,
+		Tokens:          passwordreset.NewRepository(pool),
+		UoW:             uow,
+		ExternalBaseURL: cfg.JWTIssuer,
+	})
 
 	// /oauth/authorize is mounted OUTSIDE the auth middleware: an absent or
 	// expired session must redirect to login (not 401), and the handler
@@ -304,7 +328,10 @@ func WirePlatform(r chi.Router, pool *pgxpool.Pool, cfg EnvCfg) error {
 		// OAuth provider routes — all hand-rolled (authservice +
 		// encryption). /oauth/authorize is registered above, outside this
 		// auth group.
-		oauthTokenEP.RegisterTokenRoutes(r.With(ratelimit.IPLimitMiddleware(rlStore, ratelimit.BucketOAuthTokenIP, rlPolicies.OAuthTokenIP)))
+		oauthTokenEP.RegisterTokenRoutes(r.With(
+			ratelimit.GovernorMiddleware(oauthTokenIPGov, "rate limit exceeded for this IP"),
+			ratelimit.IPLimitMiddleware(rlStore, ratelimit.BucketOAuthTokenIP, rlPolicies.OAuthTokenIP),
+		))
 		oauthTokenEP.RegisterIntrospectRoutes(r)
 		oauthTokenEP.RegisterRevokeRoutes(r)
 		oauthTokenEP.RegisterUserinfoRoutes(r)
@@ -326,7 +353,7 @@ func WirePlatform(r chi.Router, pool *pgxpool.Pool, cfg EnvCfg) error {
 		bridgeClient := bridge.NewBridge(authRepo, appEnc)
 		loginStateRepo := bridge.NewLoginStateRepo(pool)
 		bridgeLoginEP := bridge.NewLoginEndpoint(bridgeClient, loginStateRepo, principalRepo, edmRepo,
-			roleRepo, authRepo.IdpRoleMappings, uow)
+			roleRepo, authRepo.IdpRoleMappings, uow, authRepo.OAuthClients)
 		bridgeLoginEP.SessionWriter = func(w http.ResponseWriter, r *http.Request, principalID, returnURL string) {
 			token, err := authProvider.MintSessionToken(r.Context(), principalID, login.SessionTTL)
 			if err != nil {
@@ -374,6 +401,22 @@ func WirePlatform(r chi.Router, pool *pgxpool.Pool, cfg EnvCfg) error {
 		eventtypeapi.Register(humaAPI, &eventtypeapi.State{
 			Repo: eventTypeRepo,
 			UoW:  uow,
+		})
+
+		// SDK self-registration ("sync") endpoints, scoped under
+		// /api/applications/{appCode}. Mirrors the Rust sdk_sync_router.
+		sdksync.Register(humaAPI, &sdksync.State{
+			Apps:          applicationRepo,
+			EventTypes:    eventTypeRepo,
+			Roles:         roleRepo,
+			Subscriptions: subscriptionRepo,
+			Connections:   connectionRepo,
+			Processes:     processRepo,
+			DispatchPools: dispatchPoolRepo,
+			Principals:    principalRepo,
+			ScheduledJobs: scheduledJobRepo,
+			Specs:         openapispecs.NewRepository(pool),
+			UoW:           uow,
 		})
 
 		eventapi.Register(humaAPI, &eventapi.State{Repo: eventRepo})
@@ -447,7 +490,7 @@ func WirePlatform(r chi.Router, pool *pgxpool.Pool, cfg EnvCfg) error {
 				return humaAPI.OpenAPI().MarshalJSON()
 			},
 		})
-		meapi.RegisterRoutes(r, &meapi.State{Principals: principalRepo})
+		meapi.RegisterRoutes(r, &meapi.State{Principals: principalRepo, Applications: applicationRepo})
 		sdkapi.RegisterRoutes(r, &sdkapi.DispatchJobsBatchState{Repo: dispatchJobRepo})
 	})
 

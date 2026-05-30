@@ -8,14 +8,15 @@ import (
 )
 
 const (
-	ScheduledJobCreatedType        = "platform:admin:scheduled-job:created"
-	ScheduledJobUpdatedType        = "platform:admin:scheduled-job:updated"
-	ScheduledJobPausedType         = "platform:admin:scheduled-job:paused"
-	ScheduledJobResumedType        = "platform:admin:scheduled-job:resumed"
-	ScheduledJobArchivedType       = "platform:admin:scheduled-job:archived"
-	ScheduledJobDeletedType        = "platform:admin:scheduled-job:deleted"
-	ScheduledJobFiredManuallyType  = "platform:admin:scheduled-job:fired-manually"
-	Source                         = "platform:admin"
+	ScheduledJobCreatedType       = "platform:admin:scheduled-job:created"
+	ScheduledJobUpdatedType       = "platform:admin:scheduled-job:updated"
+	ScheduledJobPausedType        = "platform:admin:scheduled-job:paused"
+	ScheduledJobResumedType       = "platform:admin:scheduled-job:resumed"
+	ScheduledJobArchivedType      = "platform:admin:scheduled-job:archived"
+	ScheduledJobDeletedType       = "platform:admin:scheduled-job:deleted"
+	ScheduledJobFiredManuallyType = "platform:admin:scheduled-job:fired-manually"
+	ScheduledJobsSyncedType       = "platform:admin:scheduledjobs:synced"
+	Source                        = "platform:admin"
 )
 
 func subjectFor(id string) string { return "platform.scheduledjob." + id }
@@ -91,4 +92,39 @@ func (e ScheduledJobFiredManually) ToDataJSON() ([]byte, error) {
 		Code       string `json:"code"`
 		InstanceID string `json:"instanceId"`
 	}{e.ScheduledJobID, e.Code, e.InstanceID})
+}
+
+// ScheduledJobsSynced is the rollup emitted by the SDK scheduled-job sync
+// (SyncScheduledJobs). Unlike the other sync rollups it carries the affected
+// job IDs (not just counts), since the SDK contract returns the created /
+// updated / archived ID arrays. Mirrors the Rust ScheduledJobsSynced event.
+type ScheduledJobsSynced struct {
+	Metadata        usecase.EventMetadata
+	ApplicationCode string
+	ClientID        *string
+	Created         []string
+	Updated         []string
+	Archived        []string
+}
+
+func (e ScheduledJobsSynced) EventID() string     { return e.Metadata.EventID }
+func (e ScheduledJobsSynced) EventType() string   { return ScheduledJobsSyncedType }
+func (e ScheduledJobsSynced) SpecVersion() string { return "1.0" }
+func (e ScheduledJobsSynced) Source() string      { return Source }
+func (e ScheduledJobsSynced) Subject() string {
+	return "platform.scheduledjobs.synced." + e.ApplicationCode
+}
+func (e ScheduledJobsSynced) Time() time.Time       { return e.Metadata.OccurredAt }
+func (e ScheduledJobsSynced) PrincipalID() string   { return e.Metadata.PrincipalID }
+func (e ScheduledJobsSynced) CorrelationID() string { return e.Metadata.CorrelationID }
+func (e ScheduledJobsSynced) CausationID() string   { return e.Metadata.CausationID }
+func (e ScheduledJobsSynced) ExecutionID() string   { return e.Metadata.ExecutionID }
+func (e ScheduledJobsSynced) MessageGroup() string  { return "platform:scheduledjobs:synced" }
+func (e ScheduledJobsSynced) ToDataJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		ApplicationCode string   `json:"applicationCode"`
+		Created         []string `json:"created"`
+		Updated         []string `json:"updated"`
+		Archived        []string `json:"archived"`
+	}{e.ApplicationCode, e.Created, e.Updated, e.Archived})
 }

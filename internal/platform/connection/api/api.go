@@ -158,11 +158,10 @@ type createOutput struct {
 
 func (s *State) create(ctx context.Context, in *createInput) (*createOutput, error) {
 	ac := auth.FromContext(ctx)
-	if in.Body.ClientID != nil && !ac.CanAccessClient(*in.Body.ClientID) {
-		return nil, httperror.Forbidden("No access to client: " + *in.Body.ClientID)
-	}
-	if in.Body.ClientID == nil && !ac.IsAnchor() {
-		return nil, httperror.Forbidden("Only anchor users can create anchor-level connections")
+	// Connections are anchor-only across all mutations (1:1 with Rust
+	// connection/api.rs, which require_anchor on every write).
+	if err := auth.RequireAnchor(ac); err != nil {
+		return nil, err
 	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
 	committed, err := operations.CreateConnection(ctx, s.Repo, s.UoW, in.Body.toCommand(), ec)
@@ -181,6 +180,9 @@ type emptyOutput struct{}
 
 func (s *State) update(ctx context.Context, in *updateInput) (*emptyOutput, error) {
 	ac := auth.FromContext(ctx)
+	if err := auth.RequireAnchor(ac); err != nil {
+		return nil, err
+	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
 	if _, err := operations.UpdateConnection(ctx, s.Repo, s.UoW, in.Body.toCommand(in.ID), ec); err != nil {
 		return nil, err
@@ -194,6 +196,9 @@ type deleteInput struct {
 
 func (s *State) delete(ctx context.Context, in *deleteInput) (*emptyOutput, error) {
 	ac := auth.FromContext(ctx)
+	if err := auth.RequireAnchor(ac); err != nil {
+		return nil, err
+	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
 	if _, err := operations.DeleteConnection(ctx, s.Repo, s.UoW, operations.DeleteCommand{ID: in.ID}, ec); err != nil {
 		return nil, err
@@ -207,7 +212,7 @@ type statusInput struct {
 
 func (s *State) pause(ctx context.Context, in *statusInput) (*getOutput, error) {
 	ac := auth.FromContext(ctx)
-	if err := auth.CanUpdateConnections(ac); err != nil {
+	if err := auth.RequireAnchor(ac); err != nil {
 		return nil, err
 	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
@@ -219,7 +224,7 @@ func (s *State) pause(ctx context.Context, in *statusInput) (*getOutput, error) 
 
 func (s *State) activate(ctx context.Context, in *statusInput) (*getOutput, error) {
 	ac := auth.FromContext(ctx)
-	if err := auth.CanUpdateConnections(ac); err != nil {
+	if err := auth.RequireAnchor(ac); err != nil {
 		return nil, err
 	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)

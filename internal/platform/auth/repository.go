@@ -29,7 +29,7 @@ type Repository struct {
 func NewRepository(pool *pgxpool.Pool) *Repository {
 	q := dbq.New(pool)
 	return &Repository{
-		OAuthClients:      &OAuthClientRepo{q: q},
+		OAuthClients:      &OAuthClientRepo{q: q, pool: pool},
 		AnchorDomains:     &AnchorDomainRepo{q: q},
 		ClientAuthConfigs: &ClientAuthConfigRepo{q: q},
 		IdpRoleMappings:   &IdpRoleMappingRepo{q: q},
@@ -38,14 +38,21 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 
 // ── OAuthClient repo ──────────────────────────────────────────────────────
 //
-// Schema: oauth_clients + oauth_client_redirect_uris + oauth_client_grant_types.
-// The schema also has oauth_client_post_logout_redirect_uris,
-// oauth_client_allowed_origins, and oauth_client_application_ids junctions;
-// the Go entity doesn't carry those fields yet so they're untouched.
-// The Go side stores Argon2-hashed secrets in the client_secret_ref column
-// (Rust uses it as an external secret-manager reference). See HANDOFF.md §4.
+// Schema: oauth_clients + oauth_client_redirect_uris +
+// oauth_client_grant_types + oauth_client_post_logout_redirect_uris (the
+// OIDC RP-Initiated Logout whitelist consulted by /auth/oidc/session/end).
+// The post-logout junction is loaded/persisted via raw pgx (it isn't wired
+// through sqlc). The schema also has oauth_client_allowed_origins and
+// oauth_client_application_ids junctions the Go entity doesn't carry yet.
+// client_secret_ref holds the reversibly-encrypted client secret
+// (AES-256-GCM under FLOWCATALYST_APP_KEY, "encrypted:"-prefixed),
+// matching Rust; it is verified at /oauth/token by decrypt-and-compare,
+// NOT by hashing. See internal/platform/shared/encryption.
 
-type OAuthClientRepo struct{ q *dbq.Queries }
+type OAuthClientRepo struct {
+	q    *dbq.Queries
+	pool *pgxpool.Pool
+}
 
 func (r *OAuthClientRepo) FindByID(ctx context.Context, id string) (*OAuthClient, error) {
 	row, err := r.q.OAuthClientFindByID(ctx, id)
@@ -123,6 +130,19 @@ func (r *OAuthClientRepo) Persist(ctx context.Context, c *OAuthClient, tx *useca
 			return err
 		}
 	}
+	// Post-logout redirect URIs — raw pgx (this junction isn't wired
+	// through sqlc). Clear-then-reinsert mirrors the redirect_uris path.
+	if _, err := tx.Inner().Exec(ctx,
+		`DELETE FROM oauth_client_post_logout_redirect_uris WHERE oauth_client_id = $1`, c.ID); err != nil {
+		return fmt.Errorf("post_logout uris clear: %w", err)
+	}
+	for _, u := range c.PostLogoutRedirectURIs {
+		if _, err := tx.Inner().Exec(ctx,
+			`INSERT INTO oauth_client_post_logout_redirect_uris (oauth_client_id, post_logout_redirect_uri)
+			 VALUES ($1, $2) ON CONFLICT DO NOTHING`, c.ID, u); err != nil {
+			return fmt.Errorf("post_logout uri insert: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -134,6 +154,10 @@ func (r *OAuthClientRepo) Delete(ctx context.Context, c *OAuthClient, tx *usecas
 		return err
 	}
 	if err := q.OAuthClientGrantTypesClear(ctx, c.ID); err != nil {
+		return err
+	}
+	if _, err := tx.Inner().Exec(ctx,
+		`DELETE FROM oauth_client_post_logout_redirect_uris WHERE oauth_client_id = $1`, c.ID); err != nil {
 		return err
 	}
 	return q.OAuthClientDelete(ctx, c.ID)
@@ -163,6 +187,29 @@ func (r *OAuthClientRepo) hydrateAll(ctx context.Context, clients []OAuthClient)
 	if err != nil {
 		return nil, err
 	}
+	// Post-logout redirect URIs — raw pgx (this junction isn't wired
+	// through sqlc). Needed so /auth/oidc/session/end can validate a
+	// supplied post_logout_redirect_uri against the client's whitelist.
+	plByID := map[string][]string{}
+	plRows, err := r.pool.Query(ctx,
+		`SELECT oauth_client_id, post_logout_redirect_uri
+		   FROM oauth_client_post_logout_redirect_uris
+		  WHERE oauth_client_id = ANY($1)`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("post_logout uris load: %w", err)
+	}
+	for plRows.Next() {
+		var cid, uri string
+		if err := plRows.Scan(&cid, &uri); err != nil {
+			plRows.Close()
+			return nil, err
+		}
+		plByID[cid] = append(plByID[cid], uri)
+	}
+	plRows.Close()
+	if err := plRows.Err(); err != nil {
+		return nil, err
+	}
 	urisByID := map[string][]string{}
 	for _, u := range uriRows {
 		urisByID[u.OauthClientID] = append(urisByID[u.OauthClientID], u.RedirectUri)
@@ -174,11 +221,15 @@ func (r *OAuthClientRepo) hydrateAll(ctx context.Context, clients []OAuthClient)
 	for i := range clients {
 		clients[i].RedirectURIs = urisByID[clients[i].ID]
 		clients[i].GrantTypes = grantsByID[clients[i].ID]
+		clients[i].PostLogoutRedirectURIs = plByID[clients[i].ID]
 		if clients[i].RedirectURIs == nil {
 			clients[i].RedirectURIs = []string{}
 		}
 		if clients[i].GrantTypes == nil {
 			clients[i].GrantTypes = []string{}
+		}
+		if clients[i].PostLogoutRedirectURIs == nil {
+			clients[i].PostLogoutRedirectURIs = []string{}
 		}
 	}
 	return clients, nil
@@ -186,19 +237,20 @@ func (r *OAuthClientRepo) hydrateAll(ctx context.Context, clients []OAuthClient)
 
 func rowToOAuthClient(row dbq.OauthClient) *OAuthClient {
 	c := OAuthClient{
-		ID:           row.ID,
-		ClientID:     row.ClientID,
-		ClientName:   row.ClientName,
-		ClientType:   ParseOAuthClientType(row.ClientType),
-		SecretRef:    row.ClientSecretRef,
-		PKCERequired: row.PkceRequired,
-		Active:       row.Active,
-		PrincipalID:  row.ServiceAccountPrincipalID,
-		CreatedAt:    row.CreatedAt,
-		UpdatedAt:    row.UpdatedAt,
-		RedirectURIs: []string{},
-		GrantTypes:   []string{},
-		Scopes:       []string{},
+		ID:                     row.ID,
+		ClientID:               row.ClientID,
+		ClientName:             row.ClientName,
+		ClientType:             ParseOAuthClientType(row.ClientType),
+		SecretRef:              row.ClientSecretRef,
+		PKCERequired:           row.PkceRequired,
+		Active:                 row.Active,
+		PrincipalID:            row.ServiceAccountPrincipalID,
+		CreatedAt:              row.CreatedAt,
+		UpdatedAt:              row.UpdatedAt,
+		RedirectURIs:           []string{},
+		PostLogoutRedirectURIs: []string{},
+		GrantTypes:             []string{},
+		Scopes:                 []string{},
 	}
 	if row.DefaultScopes != nil && *row.DefaultScopes != "" {
 		for _, s := range strings.Split(*row.DefaultScopes, ",") {

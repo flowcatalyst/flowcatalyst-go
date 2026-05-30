@@ -11,174 +11,219 @@ import (
 type CircuitState int32
 
 const (
-	// CircuitClosed allows all requests; recent failures tallied in a sliding window.
+	// CircuitClosed allows all requests; failures tallied in a sliding window.
 	CircuitClosed CircuitState = iota
-	// CircuitOpen rejects all requests for OpenTimeout, then transitions to HalfOpen.
+	// CircuitOpen rejects all requests until ResetTimeout elapses since the
+	// last failure, then the next Allow transitions to HalfOpen.
 	CircuitOpen
-	// CircuitHalfOpen allows a single trial request; success closes, failure re-opens.
+	// CircuitHalfOpen allows trial requests; SuccessThreshold consecutive
+	// successes close it, any failure re-opens it.
 	CircuitHalfOpen
 )
 
 // ErrCircuitOpen is returned by Allow when the breaker is open.
 var ErrCircuitOpen = errors.New("circuit breaker open")
 
-// BreakerConfig tunes the failure thresholds.
+// BreakerConfig tunes the failure-RATE thresholds. 1:1 with the Rust
+// CircuitBreakerConfig (Java MicroProfile defaults): trip when the failure
+// rate over a sliding window reaches a threshold, given a minimum number of
+// buffered calls — NOT a raw failure count.
 type BreakerConfig struct {
-	// FailureThreshold is the number of failures within the window required to trip.
-	FailureThreshold int
-	// WindowSize is the sliding-window length in samples.
-	WindowSize int
-	// OpenTimeout is how long the circuit stays Open before going HalfOpen.
-	OpenTimeout time.Duration
+	// FailureRateThreshold trips the breaker when the windowed failure rate
+	// reaches it (0.0–1.0). Java failureRatio = 0.5.
+	FailureRateThreshold float64
+	// MinCalls is the minimum buffered calls before the rate is evaluated.
+	// Java requestVolumeThreshold = 10.
+	MinCalls int
+	// SuccessThreshold is the consecutive half-open successes needed to close.
+	// Java successThreshold = 3.
+	SuccessThreshold int
+	// ResetTimeout is how long after the last failure an Open breaker waits
+	// before allowing a half-open trial. Java delay = 5s.
+	ResetTimeout time.Duration
+	// BufferSize is the sliding-window length in samples. Java = 100.
+	BufferSize int
 }
 
-// DefaultBreakerConfig matches the Rust defaults.
+// DefaultBreakerConfig matches the Rust/Java defaults.
 func DefaultBreakerConfig() BreakerConfig {
 	return BreakerConfig{
-		FailureThreshold: 5,
-		WindowSize:       10,
-		OpenTimeout:      30 * time.Second,
+		FailureRateThreshold: 0.5,
+		MinCalls:             10,
+		SuccessThreshold:     3,
+		ResetTimeout:         5 * time.Second,
+		BufferSize:           100,
 	}
 }
 
-// CircuitBreaker is a per-endpoint state machine.
+// CircuitBreaker is a per-endpoint failure-rate state machine. A single mutex
+// guards the state, sliding window, half-open success count, and last-failure
+// time (mirrors the Rust BreakerInner); the cumulative counters and
+// lastActivity are independent atomics.
 type CircuitBreaker struct {
 	cfg BreakerConfig
 
-	state      atomic.Int32 // CircuitState
-	openedAt   atomic.Int64 // unix nano when state became Open
-	successes  atomic.Uint64
-	failures   atomic.Uint64
-	// lastActivity is the unix nano of the most recent Allow/Record* call.
-	// Read by BreakerRegistry.Evict to drop idle entries (Rust parity:
-	// circuit_breaker_registry.rs::evict_idle).
-	lastActivity atomic.Int64
+	successes    atomic.Uint64 // cumulative successes (metrics)
+	failures     atomic.Uint64 // cumulative failures (metrics)
+	lastActivity atomic.Int64  // unix nano of the most recent Allow/Record*; for Evict
 
-	mu     sync.Mutex
-	window []bool // true=success, false=failure; ring buffer
-	head   int
-	count  int
+	mu                sync.Mutex
+	state             CircuitState
+	window            []bool // ring buffer, len == BufferSize; true=success
+	head              int
+	count             int
+	halfOpenSuccesses int
+	lastFailureNano   int64
 }
 
 // NewCircuitBreaker builds a fresh breaker in Closed state.
 func NewCircuitBreaker(cfg BreakerConfig) *CircuitBreaker {
-	cb := &CircuitBreaker{cfg: cfg, window: make([]bool, cfg.WindowSize)}
-	cb.state.Store(int32(CircuitClosed))
+	bs := cfg.BufferSize
+	if bs < 1 {
+		bs = 1
+	}
+	cb := &CircuitBreaker{cfg: cfg, state: CircuitClosed, window: make([]bool, bs)}
 	cb.lastActivity.Store(time.Now().UnixNano())
 	return cb
 }
 
-// State returns the current state, transitioning Open→HalfOpen if the
-// open timeout has elapsed.
+// State returns the current stored state (no transition — Open→HalfOpen
+// happens in Allow, matching Rust get_stats).
 func (cb *CircuitBreaker) State() CircuitState {
-	s := CircuitState(cb.state.Load())
-	if s != CircuitOpen {
-		return s
-	}
-	since := time.Since(time.Unix(0, cb.openedAt.Load()))
-	if since >= cb.cfg.OpenTimeout {
-		cb.state.CompareAndSwap(int32(CircuitOpen), int32(CircuitHalfOpen))
-		return CircuitState(cb.state.Load())
-	}
-	return CircuitOpen
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	return cb.state
 }
 
-// Allow checks whether a request is permitted. Returns ErrCircuitOpen
-// when the breaker is open and the open-timeout hasn't elapsed.
+// ResetTimeout returns the configured open→half-open wait. The mediator uses it
+// to set the defer delay when it returns a circuit-open outcome.
+func (cb *CircuitBreaker) ResetTimeout() time.Duration { return cb.cfg.ResetTimeout }
+
+// Allow reports whether a request is permitted. Open transitions to HalfOpen
+// once ResetTimeout has elapsed since the last failure (1:1 with Rust
+// allow_request).
 func (cb *CircuitBreaker) Allow() error {
-	cb.lastActivity.Store(time.Now().UnixNano())
-	if cb.State() == CircuitOpen {
+	now := time.Now()
+	cb.lastActivity.Store(now.UnixNano())
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	switch cb.state {
+	case CircuitOpen:
+		if cb.lastFailureNano != 0 && now.Sub(time.Unix(0, cb.lastFailureNano)) >= cb.cfg.ResetTimeout {
+			cb.state = CircuitHalfOpen
+			cb.halfOpenSuccesses = 0
+			return nil
+		}
 		return ErrCircuitOpen
+	default: // Closed, HalfOpen
+		return nil
 	}
-	return nil
 }
 
-// RecordSuccess records a successful request.
+// RecordSuccess records a successful request. In HalfOpen, SuccessThreshold
+// consecutive successes close the breaker and clear the window.
 func (cb *CircuitBreaker) RecordSuccess() {
 	cb.successes.Add(1)
 	cb.lastActivity.Store(time.Now().UnixNano())
-	cb.appendOutcome(true)
-	// Half-open trial succeeded → close.
-	cb.state.CompareAndSwap(int32(CircuitHalfOpen), int32(CircuitClosed))
-}
-
-// RecordFailure records a failure and may trip the breaker.
-func (cb *CircuitBreaker) RecordFailure() {
-	cb.failures.Add(1)
-	cb.lastActivity.Store(time.Now().UnixNano())
-	cb.appendOutcome(false)
-
-	// Half-open trial failed → re-open.
-	if cb.state.CompareAndSwap(int32(CircuitHalfOpen), int32(CircuitOpen)) {
-		cb.openedAt.Store(time.Now().UnixNano())
-		return
-	}
-
-	// Closed: count recent failures and trip if over threshold.
-	if cb.State() == CircuitClosed {
-		if cb.recentFailures() >= cb.cfg.FailureThreshold {
-			if cb.state.CompareAndSwap(int32(CircuitClosed), int32(CircuitOpen)) {
-				cb.openedAt.Store(time.Now().UnixNano())
-			}
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.pushLocked(true)
+	if cb.state == CircuitHalfOpen {
+		cb.halfOpenSuccesses++
+		if cb.halfOpenSuccesses >= cb.cfg.SuccessThreshold {
+			cb.state = CircuitClosed
+			cb.clearWindowLocked()
+			cb.halfOpenSuccesses = 0
 		}
 	}
 }
 
-func (cb *CircuitBreaker) appendOutcome(ok bool) {
+// RecordFailure records a failure. In Closed it trips the breaker when the
+// windowed failure rate reaches the threshold (with at least MinCalls
+// buffered); in HalfOpen any failure immediately re-opens.
+func (cb *CircuitBreaker) RecordFailure() {
+	cb.failures.Add(1)
+	now := time.Now()
+	cb.lastActivity.Store(now.UnixNano())
 	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.lastFailureNano = now.UnixNano()
+	cb.pushLocked(false)
+	switch cb.state {
+	case CircuitClosed:
+		if cb.count >= cb.cfg.MinCalls && cb.failureRateLocked() >= cb.cfg.FailureRateThreshold {
+			cb.state = CircuitOpen
+		}
+	case CircuitHalfOpen:
+		cb.state = CircuitOpen
+		cb.halfOpenSuccesses = 0
+	case CircuitOpen:
+		// stay open
+	}
+}
+
+func (cb *CircuitBreaker) pushLocked(ok bool) {
 	cb.window[cb.head] = ok
 	cb.head = (cb.head + 1) % len(cb.window)
 	if cb.count < len(cb.window) {
 		cb.count++
 	}
-	cb.mu.Unlock()
 }
 
-func (cb *CircuitBreaker) recentFailures() int {
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
-	failed := 0
-	for i := range cb.count {
+func (cb *CircuitBreaker) failuresLocked() int {
+	f := 0
+	for i := 0; i < cb.count; i++ {
 		if !cb.window[i] {
-			failed++
+			f++
 		}
 	}
-	return failed
+	return f
 }
 
-// Reset forces the breaker back to Closed and clears the sliding
-// failure window + cumulative counters. Used by the dashboard's
-// circuit-breaker reset endpoint.
+func (cb *CircuitBreaker) failureRateLocked() float64 {
+	if cb.count == 0 {
+		return 0
+	}
+	return float64(cb.failuresLocked()) / float64(cb.count)
+}
+
+func (cb *CircuitBreaker) clearWindowLocked() {
+	cb.head = 0
+	cb.count = 0
+}
+
+// Reset forces the breaker back to Closed and clears the window + counters.
 func (cb *CircuitBreaker) Reset() {
-	cb.state.Store(int32(CircuitClosed))
-	cb.openedAt.Store(0)
 	cb.successes.Store(0)
 	cb.failures.Store(0)
 	cb.lastActivity.Store(time.Now().UnixNano())
 	cb.mu.Lock()
-	for i := range cb.window {
-		cb.window[i] = false
-	}
-	cb.head = 0
-	cb.count = 0
+	cb.state = CircuitClosed
+	cb.clearWindowLocked()
+	cb.halfOpenSuccesses = 0
+	cb.lastFailureNano = 0
 	cb.mu.Unlock()
 }
 
-// Stats is a snapshot for metrics export.
+// BreakerStats is a snapshot for metrics export.
 type BreakerStats struct {
-	State           CircuitState
-	Successes       uint64
-	Failures        uint64
-	RecentFailures  int
+	State          CircuitState
+	Successes      uint64
+	Failures       uint64
+	RecentFailures int // failures currently in the sliding window
 }
 
-// Stats returns a snapshot.
+// Stats returns a snapshot (reports the stored state; no transition).
 func (cb *CircuitBreaker) Stats() BreakerStats {
+	cb.mu.Lock()
+	st := cb.state
+	rf := cb.failuresLocked()
+	cb.mu.Unlock()
 	return BreakerStats{
-		State:          cb.State(),
+		State:          st,
 		Successes:      cb.successes.Load(),
 		Failures:       cb.failures.Load(),
-		RecentFailures: cb.recentFailures(),
+		RecentFailures: rf,
 	}
 }
 
@@ -223,11 +268,11 @@ func (r *BreakerRegistry) Snapshot() map[string]BreakerStats {
 	return out
 }
 
-// Evict drops breakers whose last Allow/RecordSuccess/RecordFailure
-// happened more than maxIdle ago. Returns the eviction count. Mirrors
-// crates/fc-router/src/circuit_breaker_registry.rs::evict_idle —
-// prevents unbounded growth when many short-lived endpoint URLs flow
-// through the router. Safe to call concurrently with normal traffic.
+// Evict drops breakers whose last Allow/RecordSuccess/RecordFailure happened
+// more than maxIdle ago. Returns the eviction count. Mirrors
+// crates/fc-router/src/circuit_breaker_registry.rs::evict_idle — prevents
+// unbounded growth when many short-lived endpoint URLs flow through the
+// router. Safe to call concurrently with normal traffic.
 func (r *BreakerRegistry) Evict(maxIdle time.Duration) int {
 	if maxIdle <= 0 {
 		return 0
@@ -266,8 +311,8 @@ func (r *BreakerRegistry) Evict(maxIdle time.Duration) int {
 	return evicted
 }
 
-// Reset clears a single breaker's state (by URL key). Returns false if
-// the URL has no registered breaker.
+// Reset clears a single breaker's state (by URL key). Returns false if the
+// URL has no registered breaker.
 func (r *BreakerRegistry) Reset(url string) bool {
 	r.mu.RLock()
 	cb, ok := r.m[url]
@@ -279,8 +324,7 @@ func (r *BreakerRegistry) Reset(url string) bool {
 	return true
 }
 
-// ResetAll clears every registered breaker. Returns the number of
-// breakers reset.
+// ResetAll clears every registered breaker. Returns the number reset.
 func (r *BreakerRegistry) ResetAll() int {
 	r.mu.RLock()
 	breakers := make([]*CircuitBreaker, 0, len(r.m))

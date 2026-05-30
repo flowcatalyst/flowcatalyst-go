@@ -102,6 +102,11 @@ type RolesSynced struct {
 	Updated  uint32
 	Removed  uint32
 	Total    uint32
+	// ApplicationCode + SyncedCodes are populated by the application-scoped
+	// SDK role sync (SyncRoles); the static platform-catalogue sync
+	// (SyncPlatformRoles) leaves them empty.
+	ApplicationCode string
+	SyncedCodes     []string
 }
 
 func (e RolesSynced) EventID() string       { return e.Metadata.EventID }
@@ -117,9 +122,11 @@ func (e RolesSynced) ExecutionID() string   { return e.Metadata.ExecutionID }
 func (e RolesSynced) MessageGroup() string  { return "platform:roles" }
 func (e RolesSynced) ToDataJSON() ([]byte, error) {
 	return json.Marshal(struct {
-		Created uint32 `json:"created"`
-		Updated uint32 `json:"updated"`
-		Removed uint32 `json:"removed"`
-		Total   uint32 `json:"total"`
-	}{e.Created, e.Updated, e.Removed, e.Total})
+		Created         uint32   `json:"created"`
+		Updated         uint32   `json:"updated"`
+		Removed         uint32   `json:"removed"`
+		Total           uint32   `json:"total"`
+		ApplicationCode string   `json:"applicationCode,omitempty"`
+		SyncedCodes     []string `json:"syncedCodes,omitempty"`
+	}{e.Created, e.Updated, e.Removed, e.Total, e.ApplicationCode, e.SyncedCodes})
 }

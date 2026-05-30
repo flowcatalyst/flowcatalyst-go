@@ -130,6 +130,81 @@ func (r *InstanceRepository) MarkComplete(ctx context.Context, instanceID string
 	return nil
 }
 
+// Insert writes a fresh instance row. The poller (CRON) and FireNow (MANUAL)
+// both start an instance at QUEUED with delivery_attempts=0; the dispatcher
+// loop then advances it. Direct infrastructure write — instances are the
+// firing-history projection, not an aggregate.
+func (r *InstanceRepository) Insert(ctx context.Context, inst *ScheduledJobInstance) error {
+	if inst.CreatedAt.IsZero() {
+		inst.CreatedAt = time.Now().UTC()
+	}
+	var completionResult []byte
+	if len(inst.CompletionResult) > 0 {
+		completionResult = []byte(inst.CompletionResult)
+	}
+	_, err := r.pool.Exec(ctx, `
+		INSERT INTO msg_scheduled_job_instances
+		    (id, scheduled_job_id, client_id, job_code, trigger_kind, scheduled_for,
+		     fired_at, delivered_at, completed_at, status, delivery_attempts,
+		     delivery_error, completion_status, completion_result, correlation_id, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+		inst.ID, inst.ScheduledJobID, inst.ClientID, inst.JobCode, string(inst.TriggerKind),
+		inst.ScheduledFor, inst.FiredAt, inst.DeliveredAt, inst.CompletedAt, string(inst.Status),
+		inst.DeliveryAttempts, inst.DeliveryError, inst.CompletionStatus, completionResult,
+		inst.CorrelationID, inst.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("scheduled_job_instance insert: %w", err)
+	}
+	return nil
+}
+
+// MarkInFlight flips a QUEUED instance to IN_FLIGHT and bumps
+// delivery_attempts, just before the dispatcher POSTs. Mirrors the Rust
+// mark_in_flight.
+func (r *InstanceRepository) MarkInFlight(ctx context.Context, instanceID string) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE msg_scheduled_job_instances
+		   SET status = 'IN_FLIGHT', delivery_attempts = delivery_attempts + 1
+		 WHERE id = $1`, instanceID)
+	if err != nil {
+		return fmt.Errorf("scheduled_job_instance mark_in_flight: %w", err)
+	}
+	return nil
+}
+
+// MarkDelivered flips an instance to DELIVERED and stamps delivered_at, on a
+// 202 ACK from the target. DELIVERED is terminal unless the job tracks
+// completion (then the SDK calls MarkComplete later). Mirrors mark_delivered.
+func (r *InstanceRepository) MarkDelivered(ctx context.Context, instanceID string) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE msg_scheduled_job_instances
+		   SET status = 'DELIVERED', delivered_at = NOW()
+		 WHERE id = $1`, instanceID)
+	if err != nil {
+		return fmt.Errorf("scheduled_job_instance mark_delivered: %w", err)
+	}
+	return nil
+}
+
+// MarkDeliveryFailed records a failed delivery attempt. When terminal (max
+// attempts reached) the instance goes to DELIVERY_FAILED; otherwise it
+// returns to QUEUED for the next dispatcher tick to retry. Mirrors
+// mark_delivery_failed (status flips to DELIVERY_FAILED or QUEUED).
+func (r *InstanceRepository) MarkDeliveryFailed(ctx context.Context, instanceID, errMsg string, terminal bool) error {
+	status := "QUEUED"
+	if terminal {
+		status = "DELIVERY_FAILED"
+	}
+	_, err := r.pool.Exec(ctx, `
+		UPDATE msg_scheduled_job_instances
+		   SET status = $2, delivery_error = $3
+		 WHERE id = $1`, instanceID, status, errMsg)
+	if err != nil {
+		return fmt.Errorf("scheduled_job_instance mark_delivery_failed: %w", err)
+	}
+	return nil
+}
+
 // ListLogs returns up to `limit` log rows for the supplied instance,
 // oldest first. A limit of <= 0 falls back to 500 (matches Rust).
 func (r *InstanceRepository) ListLogs(ctx context.Context, instanceID string, limit int64) ([]ScheduledJobInstanceLog, error) {

@@ -49,9 +49,31 @@ type PoolMetricsCollector struct {
 	totalFailure     atomic.Uint64
 	totalRateLimited atomic.Uint64
 
+	// Cumulative mediation-latency histogram, emitted as the Prometheus
+	// fc_mediation_duration_seconds histogram. Monotonic across the process
+	// lifetime — distinct from the sliding `samples` window used for the
+	// dashboard percentiles. durationBuckets[i] counts observations <=
+	// mediationBucketsSeconds[i] (cumulative "le" semantics).
+	durationCount   atomic.Uint64
+	durationSumMs   atomic.Uint64
+	durationBuckets [len(mediationBucketsSeconds)]atomic.Uint64
+
 	mu                sync.Mutex
 	samples           []metricSample // ring-trimmed; oldest first
 	rateLimitedEvents []time.Time    // ring-trimmed; oldest first
+}
+
+// mediationBucketsSeconds are the Prometheus histogram upper bounds (seconds)
+// for fc_mediation_duration_seconds — the default client_golang latency
+// buckets. (+Inf is implicit in the exposition.)
+var mediationBucketsSeconds = [...]float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
+
+// MediationHistogram is a cumulative-histogram snapshot for Prometheus.
+type MediationHistogram struct {
+	Bounds     []float64
+	Counts     []uint64 // cumulative count of observations <= Bounds[i]
+	SumSeconds float64
+	Count      uint64
 }
 
 // NewPoolMetricsCollector builds a collector with default tuning.
@@ -121,13 +143,47 @@ func (c *PoolMetricsCollector) Reset() {
 	c.totalSuccess.Store(0)
 	c.totalFailure.Store(0)
 	c.totalRateLimited.Store(0)
+	c.durationCount.Store(0)
+	c.durationSumMs.Store(0)
+	for i := range c.durationBuckets {
+		c.durationBuckets[i].Store(0)
+	}
 	c.mu.Lock()
 	c.samples = c.samples[:0]
 	c.rateLimitedEvents = c.rateLimitedEvents[:0]
 	c.mu.Unlock()
 }
 
+// observeDuration records one mediation into the cumulative histogram.
+func (c *PoolMetricsCollector) observeDuration(durationMs uint64) {
+	c.durationCount.Add(1)
+	c.durationSumMs.Add(durationMs)
+	secs := float64(durationMs) / 1000.0
+	for i, ub := range mediationBucketsSeconds {
+		if secs <= ub {
+			c.durationBuckets[i].Add(1)
+		}
+	}
+}
+
+// HistogramSnapshot returns the cumulative mediation-latency histogram.
+func (c *PoolMetricsCollector) HistogramSnapshot() MediationHistogram {
+	counts := make([]uint64, len(c.durationBuckets))
+	for i := range c.durationBuckets {
+		counts[i] = c.durationBuckets[i].Load()
+	}
+	bounds := make([]float64, len(mediationBucketsSeconds))
+	copy(bounds, mediationBucketsSeconds[:])
+	return MediationHistogram{
+		Bounds:     bounds,
+		Counts:     counts,
+		SumSeconds: float64(c.durationSumMs.Load()) / 1000.0,
+		Count:      c.durationCount.Load(),
+	}
+}
+
 func (c *PoolMetricsCollector) addSample(durationMs uint64, success bool) {
+	c.observeDuration(durationMs)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := time.Now()

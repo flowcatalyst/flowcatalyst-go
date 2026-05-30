@@ -78,6 +78,33 @@ func (r *Repository) Consume(ctx context.Context, tokenHash string) (*Token, err
 	return &t, nil
 }
 
+// FindByTokenHash returns the token for the given hash WITHOUT consuming it
+// (used by the validate endpoint, which must not delete). Returns (nil, nil)
+// when absent. Expiry is reported by the caller via Token.IsExpired.
+func (r *Repository) FindByTokenHash(ctx context.Context, tokenHash string) (*Token, error) {
+	row := r.pool.QueryRow(ctx,
+		`SELECT id, principal_id, token_hash, expires_at, created_at
+		   FROM iam_password_reset_tokens WHERE token_hash = $1`,
+		tokenHash)
+	var t Token
+	if err := row.Scan(&t.ID, &t.PrincipalID, &t.TokenHash, &t.ExpiresAt, &t.CreatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("find token: %w", err)
+	}
+	return &t, nil
+}
+
+// DeleteByPrincipalID removes every reset token for a principal. Used to
+// invalidate outstanding tokens before issuing a new one and after a
+// successful reset (single-use across the whole set).
+func (r *Repository) DeleteByPrincipalID(ctx context.Context, principalID string) error {
+	_, err := r.pool.Exec(ctx,
+		`DELETE FROM iam_password_reset_tokens WHERE principal_id = $1`, principalID)
+	return err
+}
+
 // PurgeExpired removes all expired tokens. Run periodically by a janitor.
 func (r *Repository) PurgeExpired(ctx context.Context) (int64, error) {
 	tag, err := r.pool.Exec(ctx,

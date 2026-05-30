@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/scheduledjob"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/shared/httperror"
@@ -65,6 +66,9 @@ func CreateScheduledJob(
 	for _, c := range cmd.Crons {
 		if strings.TrimSpace(c) == "" {
 			return zero, usecase.Validation("INVALID_CRON", "cron expressions cannot be empty")
+		}
+		if err := scheduledjob.ValidateCronShape(c); err != nil {
+			return zero, usecase.Validation("CRON_INVALID_SHAPE", err.Error())
 		}
 	}
 
@@ -145,6 +149,17 @@ func UpdateScheduledJob(
 		j.Description = cmd.Description
 	}
 	if cmd.Crons != nil {
+		if len(cmd.Crons) == 0 {
+			return zero, usecase.Validation("CRONS_REQUIRED", "at least one cron expression is required")
+		}
+		for _, c := range cmd.Crons {
+			if strings.TrimSpace(c) == "" {
+				return zero, usecase.Validation("INVALID_CRON", "cron expressions cannot be empty")
+			}
+			if err := scheduledjob.ValidateCronShape(c); err != nil {
+				return zero, usecase.Validation("CRON_INVALID_SHAPE", err.Error())
+			}
+		}
 		j.Crons = cmd.Crons
 	}
 	if cmd.Timezone != nil {
@@ -307,16 +322,26 @@ func DeleteScheduledJob(
 
 // ── FireNow ───────────────────────────────────────────────────────────────
 
-// FireNowCommand triggers a manual fire. The scheduler's dispatcher
-// (Wave 3g) actually writes the msg_scheduled_job_instances row; this
-// use case emits the audit event recording the human action.
+// FireNowCommand triggers a manual fire. An optional CorrelationID is
+// stamped on the instance + carried in the firing webhook (mirrors the Rust
+// FireRequest.correlation_id).
 type FireNowCommand struct {
-	ID string `json:"id"`
+	ID            string  `json:"id"`
+	CorrelationID *string `json:"correlationId,omitempty"`
 }
 
+// FireNow inserts a MANUAL instance row (QUEUED, picked up by the dispatcher
+// on its next tick) and emits the ScheduledJobFiredManually audit event.
+// Two-phase, mirroring Rust fire_now: the infrastructure insert happens first
+// (no UoW — instances are a projection), then the event is emitted; a failed
+// insert yields no event.
+//
+// PAUSED jobs ARE firable manually — that's the point of a manual trigger
+// (the poller skips PAUSED; a human can override). Only ARCHIVED is rejected.
 func FireNow(
 	ctx context.Context,
 	repo *scheduledjob.Repository,
+	instances *scheduledjob.InstanceRepository,
 	uow *usecasepgx.UnitOfWork,
 	cmd FireNowCommand,
 	ec usecase.ExecutionContext,
@@ -332,10 +357,28 @@ func FireNow(
 	if j == nil {
 		return zero, httperror.NotFound("ScheduledJob", cmd.ID)
 	}
-	if j.Status != scheduledjob.StatusActive {
-		return zero, usecase.Conflict("NOT_ACTIVE", "Only ACTIVE jobs can be fired manually")
+	if j.Status == scheduledjob.StatusArchived {
+		return zero, usecase.Conflict("ARCHIVED", "Archived jobs cannot be fired")
 	}
+
+	now := time.Now().UTC()
 	instanceID := tsid.Generate(tsid.ScheduledJobInstance)
+	inst := &scheduledjob.ScheduledJobInstance{
+		ID:               instanceID,
+		ScheduledJobID:   j.ID,
+		ClientID:         j.ClientID,
+		JobCode:          j.Code,
+		TriggerKind:      scheduledjob.TriggerManual,
+		FiredAt:          now,
+		Status:           scheduledjob.InstanceStatusQueued,
+		DeliveryAttempts: 0,
+		CorrelationID:    cmd.CorrelationID,
+		CreatedAt:        now,
+	}
+	if err := instances.Insert(ctx, inst); err != nil {
+		return zero, usecase.Internal("REPO", "insert instance failed", err)
+	}
+
 	event := ScheduledJobFiredManually{
 		commonEvent: commonEvent{
 			Metadata:       usecase.NewEventMetadata(ec, ScheduledJobFiredManuallyType, Source, subjectFor(j.ID)),

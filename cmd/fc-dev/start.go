@@ -106,11 +106,15 @@ func runStart(cmd *cobra.Command, _ []string) error {
 		if err := os.MkdirAll(opts.EmbeddedDBPath, 0o755); err != nil {
 			return fmt.Errorf("create data dir: %w", err)
 		}
+		cacheDir := embeddedPGCacheDir()
+		if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+			return fmt.Errorf("create cache dir: %w", err)
+		}
 		pg = embeddedpostgres.NewDatabase(embeddedpostgres.DefaultConfig().
 			Port(uint32(opts.EmbeddedDBPort)).
 			DataPath(filepath.Join(opts.EmbeddedDBPath, "data")).
-			RuntimePath(filepath.Join(opts.EmbeddedDBPath, "runtime")).
-			BinariesPath(filepath.Join(opts.EmbeddedDBPath, "bin")).
+			RuntimePath(filepath.Join(cacheDir, "runtime")).
+			BinariesPath(filepath.Join(cacheDir, "bin")).
 			Username("postgres").
 			Password("postgres").
 			Database("flowcatalyst").
@@ -156,8 +160,27 @@ func runStart(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
+	// Persist the field-encryption key so OAuth client secrets (incl. the
+	// bootstrapped MCP client) stay decryptable across restarts. fc-server
+	// requires operators to supply FLOWCATALYST_APP_KEY via env.
+	if os.Getenv("FLOWCATALYST_APP_KEY") == "" {
+		keyPath := filepath.Join(filepath.Dir(opts.EmbeddedDBPath), "app-key")
+		if key, err := ensureAppKeyFile(keyPath); err == nil {
+			_ = os.Setenv("FLOWCATALYST_APP_KEY", key)
+		} else {
+			slog.Warn("unable to persist app encryption key — OAuth client secrets won't survive restart", "err", err)
+		}
+	}
+
 	if err := seed.NewSeeder(pool).Run(rootCtx); err != nil {
 		return fmt.Errorf("seed: %w", err)
+	}
+
+	// Bootstrap local MCP credentials (idempotent, dev-only) so `fc-dev mcp`
+	// and `--mcp` just work. Non-fatal — a failure must not block the dev boot.
+	mcpBaseURL := fmt.Sprintf("http://localhost:%d", opts.APIPort)
+	if err := bootstrapMCPCredentials(rootCtx, pool, mcpBaseURL); err != nil {
+		slog.Warn("MCP credential bootstrap failed (continuing)", "err", err)
 	}
 
 	// SIGTERM / SIGINT → cancel rootCtx so server.Run drains.
@@ -197,13 +220,42 @@ func banner(opts startOpts) {
 	)
 }
 
+// defaultEmbeddedPath is the persistent per-user base for the dev Postgres data
+// CLUSTER. The re-creatable binaries + runtime live separately under the cache
+// dir (embeddedPGCacheDir), so they survive a data wipe and aren't mixed with
+// the data. Never /tmp: that may be mounted noexec (can't exec postgres) and is
+// cleared on reboot. Override the data base with FC_EMBEDDED_DB_PATH (handled by
+// the flag default).
 func defaultEmbeddedPath() string {
-	if v := os.Getenv("FC_EMBEDDED_DB_PATH"); v != "" {
-		return v
+	return filepath.Join(userDataDir(), "flowcatalyst", "embedded-pg")
+}
+
+// userDataDir returns the OS-idiomatic persistent data directory:
+// $XDG_DATA_HOME or the OS app-data dir (~/Library/Application Support on macOS,
+// %AppData% on Windows, ~/.config on Linux), with a ~/.local/share fallback.
+// Never returns /tmp.
+func userDataDir() string {
+	if x := os.Getenv("XDG_DATA_HOME"); x != "" {
+		return x
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(os.TempDir(), "fc-dev-pg")
+	if d, err := os.UserConfigDir(); err == nil {
+		return d
 	}
-	return filepath.Join(home, ".flowcatalyst", "embedded-pg")
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".local", "share")
+	}
+	return "."
+}
+
+// embeddedPGCacheDir is the OS cache dir for the extracted/downloaded Postgres
+// binaries + runtime — a re-creatable cache, so it belongs in the cache dir
+// (which, unlike /tmp, persists across reboots and isn't mounted noexec).
+func embeddedPGCacheDir() string {
+	if c, err := os.UserCacheDir(); err == nil {
+		return filepath.Join(c, "flowcatalyst", "embedded-pg")
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".cache", "flowcatalyst", "embedded-pg")
+	}
+	return filepath.Join(".", ".flowcatalyst-cache", "embedded-pg")
 }

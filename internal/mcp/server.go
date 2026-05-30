@@ -1,133 +1,79 @@
 // Package mcp implements the FlowCatalyst MCP (Model Context Protocol)
-// server. Read-only access for AI clients: list event types, list
-// subscriptions, fetch event details.
+// server: read-only, agent-facing access to the platform's event types,
+// subscriptions, applications, roles, and OpenAPI specs.
 //
-// Phase 5 ships the server scaffold + one example tool (list-event-types).
-// Full tool catalogue lands alongside the corresponding subdomain ports.
+// It is built on the official MCP Go SDK
+// (github.com/modelcontextprotocol/go-sdk), so the initialize handshake,
+// capability negotiation, and both transports (stdio + streamable-HTTP) are
+// handled by the SDK. This package supplies the tool + resource catalogue and
+// the platform API plumbing. 1:1 in surface with the Rust fc-mcp crate.
 package mcp
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"net/http"
-	"time"
+
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/flowcatalyst/flowcatalyst-go/pkg/fcsdk/client"
 )
 
-// Server is the MCP HTTP server.
+const serverName = "flowcatalyst"
+
+// serverVersion is advertised in the initialize handshake. Overridable at
+// build time via -ldflags "-X .../internal/mcp.serverVersion=...".
+var serverVersion = "dev"
+
+// instructions guide the connected agent. Mirrors the Rust server's guidance:
+// start with whoami, then explore the read-only catalogue.
+const instructions = `FlowCatalyst MCP server — read-only access to the platform's metadata.
+
+Start with "whoami" to learn your identity, scope, and accessible clients/apps,
+then "list_my_applications" for what you can act on. Use the list_* tools to
+browse event types, subscriptions, applications, and roles; the get_* tools to
+fetch one by id; "get_schema" for an event type's JSON Schema; "get_openapi"
+and "get_application_capabilities" for an application's API surface. All
+responses are JSON.`
+
+// Server wraps an MCP SDK server bound to a FlowCatalyst platform client.
 type Server struct {
 	platform *client.FlowCatalystClient
+	mcp      *mcpsdk.Server
 }
 
-// New wires a server pointing at a platform API.
-func New(platform *client.FlowCatalystClient) *Server { return &Server{platform: platform} }
-
-// JSONRPCRequest is the inbound MCP request envelope.
-type JSONRPCRequest struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id,omitempty"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params,omitempty"`
+// New builds an MCP server from resolved config, constructing the platform
+// client (and its token manager / static token) from the config's credentials.
+func New(cfg Config) *Server {
+	return NewWithClient(newPlatformClient(cfg))
 }
 
-// JSONRPCResponse is the outbound envelope.
-type JSONRPCResponse struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id,omitempty"`
-	Result  any             `json:"result,omitempty"`
-	Error   *JSONRPCError   `json:"error,omitempty"`
+// NewWithClient builds the server around an existing platform client. Used by
+// the in-process launcher (which builds the client from EnvCfg) and by tests
+// (which point it at an httptest server).
+func NewWithClient(pc *client.FlowCatalystClient) *Server {
+	s := &Server{platform: pc}
+	m := mcpsdk.NewServer(
+		&mcpsdk.Implementation{Name: serverName, Version: serverVersion},
+		&mcpsdk.ServerOptions{Instructions: instructions},
+	)
+	s.mcp = m
+	s.registerTools(m)
+	s.registerResources(m)
+	return s
 }
 
-// JSONRPCError matches the JSON-RPC 2.0 error shape.
-type JSONRPCError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+// MCP returns the underlying SDK server (for custom transport wiring).
+func (s *Server) MCP() *mcpsdk.Server { return s.mcp }
+
+// HTTPHandler returns the streamable-HTTP handler serving this server. Mount it
+// at /mcp. The same server instance is reused across requests (stateless tools).
+func (s *Server) HTTPHandler() http.Handler {
+	return mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server { return s.mcp }, nil)
 }
 
-// HandleHTTP serves the streamable-HTTP MCP transport at /mcp.
-func (s *Server) HandleHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "POST required", http.StatusMethodNotAllowed)
-		return
-	}
-	var req JSONRPCRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, req.ID, -32700, "parse error")
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
-
-	result, jerr := s.dispatch(ctx, req)
-	if jerr != nil {
-		writeError(w, req.ID, jerr.Code, jerr.Message)
-		return
-	}
-	writeOK(w, req.ID, result)
-}
-
-func (s *Server) dispatch(ctx context.Context, req JSONRPCRequest) (any, *JSONRPCError) {
-	switch req.Method {
-	case "tools/list":
-		return s.toolsList(), nil
-	case "tools/call":
-		return s.toolsCall(ctx, req.Params)
-	default:
-		return nil, &JSONRPCError{Code: -32601, Message: "method not found: " + req.Method}
-	}
-}
-
-func (s *Server) toolsList() any {
-	return map[string]any{
-		"tools": []map[string]any{
-			{
-				"name":        "list_event_types",
-				"description": "List event types defined in the FlowCatalyst platform",
-				"inputSchema": map[string]any{
-					"type":       "object",
-					"properties": map[string]any{},
-				},
-			},
-		},
-	}
-}
-
-func (s *Server) toolsCall(ctx context.Context, params json.RawMessage) (any, *JSONRPCError) {
-	var p struct {
-		Name      string          `json:"name"`
-		Arguments json.RawMessage `json:"arguments"`
-	}
-	if err := json.Unmarshal(params, &p); err != nil {
-		return nil, &JSONRPCError{Code: -32602, Message: "invalid params"}
-	}
-	switch p.Name {
-	case "list_event_types":
-		var out map[string]any
-		if err := s.platform.Get(ctx, "/api/event-types", &out); err != nil {
-			return nil, &JSONRPCError{Code: -32000, Message: fmt.Sprintf("platform: %v", err)}
-		}
-		return map[string]any{
-			"content": []map[string]any{
-				{"type": "text", "text": fmt.Sprintf("%v", out)},
-			},
-		}, nil
-	default:
-		return nil, &JSONRPCError{Code: -32601, Message: "unknown tool: " + p.Name}
-	}
-}
-
-func writeOK(w http.ResponseWriter, id json.RawMessage, result any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: id, Result: result})
-}
-
-func writeError(w http.ResponseWriter, id json.RawMessage, code int, msg string) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(JSONRPCResponse{
-		JSONRPC: "2.0", ID: id,
-		Error: &JSONRPCError{Code: code, Message: msg},
-	})
+// RunStdio serves the MCP server over stdin/stdout until the client
+// disconnects or ctx is cancelled. Logs must go to stderr (the SDK keeps
+// stdout for JSON-RPC framing).
+func (s *Server) RunStdio(ctx context.Context) error {
+	return s.mcp.Run(ctx, &mcpsdk.StdioTransport{})
 }

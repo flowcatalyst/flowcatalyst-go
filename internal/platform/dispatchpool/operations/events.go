@@ -14,6 +14,7 @@ const (
 	DispatchPoolDeletedType   = "platform:admin:dispatch-pool:deleted"
 	DispatchPoolSuspendedType = "platform:admin:dispatch-pool:suspended"
 	DispatchPoolActivatedType = "platform:admin:dispatch-pool:activated"
+	DispatchPoolsSyncedType   = "platform:admin:dispatch-pools:synced"
 	Source                    = "platform:admin"
 )
 
@@ -164,4 +165,38 @@ func (e DispatchPoolActivated) ToDataJSON() ([]byte, error) {
 		PoolID string `json:"poolId"`
 		Code   string `json:"code"`
 	}{e.PoolID, e.Code})
+}
+
+// DispatchPoolsSynced is the rollup emitted by the SDK dispatch-pool sync
+// (SyncDispatchPools). Dispatch pools are global (matched by code), so the
+// ApplicationCode is carried for audit/event provenance only. Mirrors the
+// Rust DispatchPoolsSynced event.
+type DispatchPoolsSynced struct {
+	Metadata        usecase.EventMetadata
+	ApplicationCode string
+	Created         uint32
+	Updated         uint32
+	Deleted         uint32
+	SyncedCodes     []string
+}
+
+func (e DispatchPoolsSynced) EventID() string       { return e.Metadata.EventID }
+func (e DispatchPoolsSynced) EventType() string     { return DispatchPoolsSyncedType }
+func (e DispatchPoolsSynced) SpecVersion() string   { return "1.0" }
+func (e DispatchPoolsSynced) Source() string        { return Source }
+func (e DispatchPoolsSynced) Subject() string       { return "platform.dispatchpools." + e.ApplicationCode }
+func (e DispatchPoolsSynced) Time() time.Time       { return e.Metadata.OccurredAt }
+func (e DispatchPoolsSynced) PrincipalID() string   { return e.Metadata.PrincipalID }
+func (e DispatchPoolsSynced) CorrelationID() string { return e.Metadata.CorrelationID }
+func (e DispatchPoolsSynced) CausationID() string   { return e.Metadata.CausationID }
+func (e DispatchPoolsSynced) ExecutionID() string   { return e.Metadata.ExecutionID }
+func (e DispatchPoolsSynced) MessageGroup() string  { return "platform:dispatchpools" }
+func (e DispatchPoolsSynced) ToDataJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		ApplicationCode string   `json:"applicationCode"`
+		Created         uint32   `json:"created"`
+		Updated         uint32   `json:"updated"`
+		Deleted         uint32   `json:"deleted"`
+		SyncedCodes     []string `json:"syncedCodes"`
+	}{e.ApplicationCode, e.Created, e.Updated, e.Deleted, e.SyncedCodes})
 }

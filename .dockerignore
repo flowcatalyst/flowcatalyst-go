@@ -1,0 +1,20 @@
+# Keep the build context lean + deterministic.
+.git
+.github
+**/node_modules
+# Rebuilt fresh in the frontend stage and overlaid into the Go stage.
+frontend/dist
+# Build outputs / local artifacts.
+bin/
+tmp/
+*.tsbuildinfo
+fc-server
+fc-dev
+fc-mcp-server
+# Local env / secrets — never bake into an image.
+.env
+.env.*
+# Editor / OS noise.
+.idea
+.vscode
+.DS_Store

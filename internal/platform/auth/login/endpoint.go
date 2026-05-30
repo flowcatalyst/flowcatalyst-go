@@ -23,6 +23,8 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	platformauth "github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/authservice"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/grantstore"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/loginbackoff"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/passwordhash"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/provider"
@@ -47,6 +49,11 @@ type Config struct {
 	Principals        *principal.Repository
 	Mappings          *emaildomainmapping.Repository
 	IdentityProviders *identityprovider.Repository
+
+	// RefreshTokens + Auth back POST /auth/refresh (dashboard refresh-token
+	// rotation). Optional: when either is nil the route is not registered.
+	RefreshTokens *grantstore.RefreshTokenRepository
+	Auth          *authservice.AuthService
 
 	// CookieSecure flips the cookie Secure flag. False in fc-dev (HTTP
 	// localhost). True in fc-server (HTTPS).
@@ -87,8 +94,16 @@ func (e *Endpoint) RegisterRoutes(r chi.Router) {
 // before the SPA can re-authenticate.
 func (e *Endpoint) RegisterPublicRoutes(r chi.Router) {
 	r.Post("/auth/check-domain", e.handleCheckDomain)
+	// GET variant mirrors Rust's auth_api.rs check_domain — a distinct
+	// (legacy) query-param shape. See handleCheckDomainQuery.
+	r.Get("/auth/check-domain", e.handleCheckDomainQuery)
 	r.Post("/auth/login", e.handleLogin)
 	r.Post("/auth/logout", e.handleLogout)
+	// /auth/refresh rotates a refresh token without an existing session, so
+	// it lives on the public router. Only mounted when its deps are wired.
+	if e.cfg.RefreshTokens != nil && e.cfg.Auth != nil {
+		r.Post("/auth/refresh", e.handleRefresh)
+	}
 }
 
 // RegisterAuthenticatedRoutes mounts the endpoint that requires an
@@ -154,6 +169,129 @@ func (e *Endpoint) handleCheckDomain(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// ── GET /auth/check-domain (legacy query variant) ─────────────────────────
+
+// domainCheckResponse mirrors Rust's DomainCheckResponse (auth_api.rs):
+// {domain, authMethod, providerId?, authorizationUrl?} with authMethod in
+// SCREAMING_SNAKE_CASE (INTERNAL|OIDC). Distinct from checkDomainResponse
+// (the POST variant the SPA uses, which returns authMethod internal|external
+// + loginUrl). Kept for parity with clients that use the GET form.
+type domainCheckResponse struct {
+	Domain           string  `json:"domain"`
+	AuthMethod       string  `json:"authMethod"`
+	ProviderID       *string `json:"providerId,omitempty"`
+	AuthorizationURL *string `json:"authorizationUrl,omitempty"`
+}
+
+func (e *Endpoint) handleCheckDomainQuery(w http.ResponseWriter, r *http.Request) {
+	email := r.URL.Query().Get("email")
+	domain := ""
+	if at := strings.IndexByte(email, '@'); at >= 0 && at < len(email)-1 {
+		domain = strings.ToLower(email[at+1:])
+	}
+	resp := domainCheckResponse{Domain: domain, AuthMethod: "INTERNAL"}
+	if domain != "" {
+		if edm, err := e.cfg.Mappings.FindByEmailDomain(r.Context(), domain); err == nil && edm != nil {
+			if idp, err := e.cfg.IdentityProviders.FindByID(r.Context(), edm.IdentityProviderID); err == nil && idp != nil {
+				pid := idp.ID
+				resp.ProviderID = &pid
+				if idp.Type == identityprovider.TypeOIDC {
+					resp.AuthMethod = "OIDC"
+				}
+				if idp.OIDCIssuerURL != nil {
+					au := strings.TrimRight(*idp.OIDCIssuerURL, "/") + "/authorize"
+					resp.AuthorizationURL = &au
+				}
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// ── POST /auth/refresh ─────────────────────────────────────────────────────
+
+type refreshRequest struct {
+	RefreshToken string `json:"refreshToken"`
+}
+
+// tokenRefreshResponse mirrors Rust's TokenRefreshResponse (camelCase).
+type tokenRefreshResponse struct {
+	AccessToken  string `json:"accessToken"`
+	TokenType    string `json:"tokenType"`
+	ExpiresIn    int64  `json:"expiresIn"`
+	RefreshToken string `json:"refreshToken"`
+}
+
+// handleRefresh exchanges a refresh token for a new access+refresh pair,
+// rotating the presented token. 1:1 with Rust auth_api.rs::refresh_token:
+// hash → find-valid → revoke → reissue (preserving accessible_clients).
+func (e *Endpoint) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	var req refreshRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httperror.Write(w, httperror.BadRequest("INVALID_JSON", err.Error()))
+		return
+	}
+	if req.RefreshToken == "" {
+		writeUnauthorized(w, "Invalid or expired refresh token")
+		return
+	}
+
+	tokenHash := grantstore.HashToken(req.RefreshToken)
+	stored, err := e.cfg.RefreshTokens.FindValidByHash(r.Context(), tokenHash)
+	if err != nil {
+		httperror.Write(w, err)
+		return
+	}
+	if stored == nil {
+		writeUnauthorized(w, "Invalid or expired refresh token")
+		return
+	}
+
+	// Rotate: revoke the presented token before issuing a replacement.
+	if _, err := e.cfg.RefreshTokens.RevokeByHash(r.Context(), tokenHash); err != nil {
+		httperror.Write(w, err)
+		return
+	}
+
+	p, err := e.cfg.Principals.FindByID(r.Context(), stored.PrincipalID)
+	if err != nil {
+		httperror.Write(w, err)
+		return
+	}
+	if p == nil {
+		writeUnauthorized(w, "Invalid or expired refresh token")
+		return
+	}
+	if !p.Active {
+		writeUnauthorized(w, "Account is not active")
+		return
+	}
+
+	accessToken, err := e.cfg.Auth.GenerateAccessToken(p)
+	if err != nil {
+		httperror.Write(w, err)
+		return
+	}
+
+	raw, entity, err := grantstore.GenerateTokenPair(p.ID)
+	if err != nil {
+		httperror.Write(w, err)
+		return
+	}
+	entity.AccessibleClients = stored.AccessibleClients
+	if err := e.cfg.RefreshTokens.Insert(r.Context(), entity); err != nil {
+		httperror.Write(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, tokenRefreshResponse{
+		AccessToken:  accessToken,
+		TokenType:    "Bearer",
+		ExpiresIn:    3600,
+		RefreshToken: raw,
+	})
 }
 
 // ── /auth/login ──────────────────────────────────────────────────────────

@@ -12,6 +12,7 @@ const (
 	ProcessUpdatedType  = "platform:admin:process:updated"
 	ProcessArchivedType = "platform:admin:process:archived"
 	ProcessDeletedType  = "platform:admin:process:deleted"
+	ProcessesSyncedType = "platform:admin:processes:synced"
 	Source              = "platform:admin"
 )
 
@@ -114,4 +115,37 @@ func (e ProcessDeleted) ToDataJSON() ([]byte, error) {
 		ProcessID string `json:"processId"`
 		Code      string `json:"code"`
 	}{e.ProcessID, e.Code})
+}
+
+// ProcessesSynced is the rollup emitted by the SDK app-scoped process sync
+// (SyncProcesses). Carries the create/update/delete counts plus the synced
+// codes. Mirrors the Rust ProcessesSynced event.
+type ProcessesSynced struct {
+	Metadata        usecase.EventMetadata
+	ApplicationCode string
+	Created         uint32
+	Updated         uint32
+	Deleted         uint32
+	SyncedCodes     []string
+}
+
+func (e ProcessesSynced) EventID() string       { return e.Metadata.EventID }
+func (e ProcessesSynced) EventType() string     { return ProcessesSyncedType }
+func (e ProcessesSynced) SpecVersion() string   { return "1.0" }
+func (e ProcessesSynced) Source() string        { return Source }
+func (e ProcessesSynced) Subject() string       { return "platform.processes." + e.ApplicationCode }
+func (e ProcessesSynced) Time() time.Time       { return e.Metadata.OccurredAt }
+func (e ProcessesSynced) PrincipalID() string   { return e.Metadata.PrincipalID }
+func (e ProcessesSynced) CorrelationID() string { return e.Metadata.CorrelationID }
+func (e ProcessesSynced) CausationID() string   { return e.Metadata.CausationID }
+func (e ProcessesSynced) ExecutionID() string   { return e.Metadata.ExecutionID }
+func (e ProcessesSynced) MessageGroup() string  { return "platform:processes" }
+func (e ProcessesSynced) ToDataJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		ApplicationCode string   `json:"applicationCode"`
+		Created         uint32   `json:"created"`
+		Updated         uint32   `json:"updated"`
+		Deleted         uint32   `json:"deleted"`
+		SyncedCodes     []string `json:"syncedCodes"`
+	}{e.ApplicationCode, e.Created, e.Updated, e.Deleted, e.SyncedCodes})
 }

@@ -20,10 +20,14 @@ flowcatalyst-go/
 │   ├── fc-router/main.go
 │   ├── fc-stream-processor/main.go
 │   ├── fc-outbox-processor/main.go
-│   ├── fc-mcp-server/main.go
-│   └── fc-dev/
+│   └── fc-dev/                          # dev monolith; `mcp` subcommand runs the MCP server
 │       ├── main.go
 │       └── subcommands/                # start, init, fresh, mcp, outbox, upgrade
+│
+│   NOTE: today only `cmd/fc-server` (unified, FC_*_ENABLED toggles) and
+│   `cmd/fc-dev` are built. The standalone service binaries above are an
+│   aspirational layout — by project decision the MCP server ships inside
+│   fc-server / `fc-dev mcp`, not as a separate fc-mcp-server binary.
 ├── internal/                           # non-importable internals
 │   ├── common/                         # = crates/fc-common
 │   ├── config/                         # = crates/fc-config
@@ -157,7 +161,7 @@ flowcatalyst-go/
 | `fc-outbox` | `internal/outbox` (+ backend subdirs) | 5k | Medium — buffer/distributor |
 | `fc-platform` | `internal/platform/*` | **75k** | **High** — long pole |
 | `fc-sdk` | `pkg/fcsdk` | 14k | Medium — public API |
-| `fc-mcp` | `internal/mcp`, `cmd/fc-mcp-server` | 2k | Low — thin MCP shim |
+| `fc-mcp` | `internal/mcp` (+ `cmd/fc-dev mcp`) | 2k | Low — MCP server on the official go-sdk |
 | Binaries | `cmd/*` | 5.7k | Low — wiring |
 
 ---
@@ -341,11 +345,20 @@ All claim queries use `FOR UPDATE SKIP LOCKED` — pgx handles this identically 
 
 ### MCP server
 
-Built on `github.com/mark3labs/mcp-go`. Two transports:
-- stdio (default) — JSON-RPC over stdin/stdout.
-- streamable-HTTP — for hosted scenarios.
+`internal/mcp`, built on the official `github.com/modelcontextprotocol/go-sdk`
+(the Go analog of Rust's `rmcp`). The SDK handles the `initialize` handshake,
+capability negotiation, and both transports:
+- stdio (default for `fc-dev mcp`) — JSON-RPC over stdin/stdout, logs to stderr.
+- streamable-HTTP — mounted at `/mcp` (default `127.0.0.1:8090`, `FC_MCP_BIND`/`FC_MCP_PORT`).
 
-Read-only tools: `list_event_types`, `list_subscriptions`, etc. Same tool surface as Rust.
+Read-only tool surface (1:1 with Rust): `list_event_types`, `get_event_type`,
+`get_schema`, `list_subscriptions`, `get_subscription`, `list_applications`,
+`list_roles`, `get_role`, `get_openapi`, `whoami`, `list_my_applications`,
+`get_application_capabilities`. Plus resources: 5 fixed collections
+(`flowcatalyst://{openapi/platform,applications,roles,event-types,subscriptions}`)
+and hierarchical single-entity templates (`…/event-types/{id}`, etc.). Auth is
+OAuth2 client_credentials with an in-memory token cache (refresh 60s before
+expiry); `fc-dev start` bootstraps a local MCP client + credentials file.
 
 ---
 

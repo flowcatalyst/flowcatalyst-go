@@ -29,7 +29,8 @@ type CreateOAuthClientRequest struct {
 	// PKCERequired is accepted but not persisted — the Go entity does not
 	// store a pkce flag. See OAuthClientResponse.PKCERequired (always false).
 	PKCERequired bool `json:"pkceRequired,omitempty"`
-	// PostLogoutRedirectURIs is accepted but not persisted (no entity field).
+	// PostLogoutRedirectURIs is the OIDC RP-Initiated Logout whitelist,
+	// persisted and validated by /auth/oidc/session/end.
 	PostLogoutRedirectURIs []string `json:"postLogoutRedirectUris,omitempty"`
 	// AllowedOrigins is accepted but not persisted (no entity field).
 	AllowedOrigins []string `json:"allowedOrigins,omitempty"`
@@ -46,31 +47,34 @@ func (r CreateOAuthClientRequest) toCommand() operations.CreateOAuthClientComman
 		scopes = strings.Fields(s)
 	}
 	return operations.CreateOAuthClientCommand{
-		ClientID:     r.ClientID,
-		ClientName:   r.ClientName,
-		ClientType:   r.ClientType,
-		RedirectURIs: r.RedirectURIs,
-		GrantTypes:   r.GrantTypes,
-		Scopes:       scopes,
-		PrincipalID:  r.PrincipalID,
+		ClientID:               r.ClientID,
+		ClientName:             r.ClientName,
+		ClientType:             r.ClientType,
+		RedirectURIs:           r.RedirectURIs,
+		PostLogoutRedirectURIs: r.PostLogoutRedirectURIs,
+		GrantTypes:             r.GrantTypes,
+		Scopes:                 scopes,
+		PrincipalID:            r.PrincipalID,
 	}
 }
 
 // UpdateOAuthClientRequest is the wire body for PUT /api/oauth-clients/{id}.
 type UpdateOAuthClientRequest struct {
-	ClientName   *string  `json:"clientName,omitempty"`
-	RedirectURIs []string `json:"redirectUris,omitempty"`
-	GrantTypes   []string `json:"grantTypes,omitempty"`
-	Scopes       []string `json:"scopes,omitempty"`
+	ClientName             *string  `json:"clientName,omitempty"`
+	RedirectURIs           []string `json:"redirectUris,omitempty"`
+	PostLogoutRedirectURIs []string `json:"postLogoutRedirectUris,omitempty"`
+	GrantTypes             []string `json:"grantTypes,omitempty"`
+	Scopes                 []string `json:"scopes,omitempty"`
 }
 
 func (r UpdateOAuthClientRequest) toCommand(id string) operations.UpdateOAuthClientCommand {
 	return operations.UpdateOAuthClientCommand{
-		ID:           id,
-		ClientName:   r.ClientName,
-		RedirectURIs: r.RedirectURIs,
-		GrantTypes:   r.GrantTypes,
-		Scopes:       r.Scopes,
+		ID:                     id,
+		ClientName:             r.ClientName,
+		RedirectURIs:           r.RedirectURIs,
+		PostLogoutRedirectURIs: r.PostLogoutRedirectURIs,
+		GrantTypes:             r.GrantTypes,
+		Scopes:                 r.Scopes,
 	}
 }
 
@@ -126,13 +130,17 @@ func oauthClientFromEntity(c *auth.OAuthClient) OAuthClientResponse {
 	if scopes == nil {
 		scopes = []string{}
 	}
+	plUris := c.PostLogoutRedirectURIs
+	if plUris == nil {
+		plUris = []string{}
+	}
 	return OAuthClientResponse{
 		ID:                        c.ID,
 		ClientID:                  c.ClientID,
 		ClientName:                c.ClientName,
 		ClientType:                string(c.ClientType),
 		RedirectURIs:              uris,
-		PostLogoutRedirectURIs:    []string{},
+		PostLogoutRedirectURIs:    plUris,
 		AllowedOrigins:            []string{},
 		GrantTypes:                grants,
 		DefaultScopes:             scopes,

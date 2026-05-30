@@ -18,13 +18,14 @@ import (
 // ── Create ────────────────────────────────────────────────────────────────
 
 type CreateOAuthClientCommand struct {
-	ClientID     string   `json:"clientId"`
-	ClientName   string   `json:"clientName"`
-	ClientType   string   `json:"clientType"`
-	RedirectURIs []string `json:"redirectUris,omitempty"`
-	GrantTypes   []string `json:"grantTypes,omitempty"`
-	Scopes       []string `json:"scopes,omitempty"`
-	PrincipalID  *string  `json:"principalId,omitempty"`
+	ClientID               string   `json:"clientId"`
+	ClientName             string   `json:"clientName"`
+	ClientType             string   `json:"clientType"`
+	RedirectURIs           []string `json:"redirectUris,omitempty"`
+	PostLogoutRedirectURIs []string `json:"postLogoutRedirectUris,omitempty"`
+	GrantTypes             []string `json:"grantTypes,omitempty"`
+	Scopes                 []string `json:"scopes,omitempty"`
+	PrincipalID            *string  `json:"principalId,omitempty"`
 }
 
 func CreateOAuthClient(
@@ -52,6 +53,7 @@ func CreateOAuthClient(
 	t := auth.ParseOAuthClientType(cmd.ClientType)
 	c := auth.NewOAuthClient(cmd.ClientID, cmd.ClientName, t)
 	c.RedirectURIs = cmd.RedirectURIs
+	c.PostLogoutRedirectURIs = cmd.PostLogoutRedirectURIs
 	c.GrantTypes = cmd.GrantTypes
 	c.Scopes = cmd.Scopes
 	c.PrincipalID = cmd.PrincipalID
@@ -76,11 +78,12 @@ func CreateOAuthClient(
 // ── Update ────────────────────────────────────────────────────────────────
 
 type UpdateOAuthClientCommand struct {
-	ID           string   `json:"id"`
-	ClientName   *string  `json:"clientName,omitempty"`
-	RedirectURIs []string `json:"redirectUris,omitempty"`
-	GrantTypes   []string `json:"grantTypes,omitempty"`
-	Scopes       []string `json:"scopes,omitempty"`
+	ID                     string   `json:"id"`
+	ClientName             *string  `json:"clientName,omitempty"`
+	RedirectURIs           []string `json:"redirectUris,omitempty"`
+	PostLogoutRedirectURIs []string `json:"postLogoutRedirectUris,omitempty"`
+	GrantTypes             []string `json:"grantTypes,omitempty"`
+	Scopes                 []string `json:"scopes,omitempty"`
 }
 
 func UpdateOAuthClient(
@@ -109,6 +112,9 @@ func UpdateOAuthClient(
 	}
 	if cmd.RedirectURIs != nil {
 		c.RedirectURIs = cmd.RedirectURIs
+	}
+	if cmd.PostLogoutRedirectURIs != nil {
+		c.PostLogoutRedirectURIs = cmd.PostLogoutRedirectURIs
 	}
 	if cmd.GrantTypes != nil {
 		c.GrantTypes = cmd.GrantTypes
@@ -282,10 +288,16 @@ func generateSecret() (plaintext, ref string, err error) {
 	if enc == nil {
 		return "", "", errors.New("FLOWCATALYST_APP_KEY not configured; cannot encrypt client secret")
 	}
-	ref, err = enc.Encrypt(plaintext)
+	encrypted, err := enc.Encrypt(plaintext)
 	if err != nil {
 		return "", "", err
 	}
+	// Store with the "encrypted:" prefix so the persisted string is
+	// byte-identical to what Rust writes (oauth_clients_api.rs:
+	// format!("encrypted:{}", encrypted)). Decrypt strips the prefix on
+	// read, so verification is unaffected; this keeps client_secret_ref
+	// values uniform across a mixed Go/Rust deployment.
+	ref = "encrypted:" + encrypted
 	return plaintext, ref, nil
 }
 

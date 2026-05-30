@@ -51,6 +51,22 @@ func (t *InFlightTracker) Insert(im *common.InFlightMessage) (existing *common.I
 	return im, false
 }
 
+// IsExternalRequeue reports whether the given application message ID is
+// already in flight under a DIFFERENT broker message ID — i.e. an external
+// process requeued a message (new broker/SQS id) while the original is still
+// being processed. The Manager ACK-drops such duplicates at route time.
+// Mirrors Rust filter_duplicates' app-message-id check. A blank brokerID
+// (Postgres-style queues without a distinct broker id) is never a requeue.
+func (t *InFlightTracker) IsExternalRequeue(appMsgID, brokerID string) bool {
+	if brokerID == "" {
+		return false
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	e, ok := t.byMessage[appMsgID]
+	return ok && e.BrokerMessageID != "" && e.BrokerMessageID != brokerID
+}
+
 // Remove clears the message from the tracker. Idempotent.
 func (t *InFlightTracker) Remove(messageID, brokerID string) {
 	t.mu.Lock()

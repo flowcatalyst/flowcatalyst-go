@@ -126,11 +126,15 @@ func runFresh(cmd *cobra.Command, _ []string) error {
 		if err := os.MkdirAll(dataPath, 0o755); err != nil {
 			return fmt.Errorf("create data dir: %w", err)
 		}
+		cacheDir := embeddedPGCacheDir()
+		if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+			return fmt.Errorf("create cache dir: %w", err)
+		}
 		pg = embeddedpostgres.NewDatabase(embeddedpostgres.DefaultConfig().
 			Port(uint32(port)).
 			DataPath(filepath.Join(dataPath, "data")).
-			RuntimePath(filepath.Join(dataPath, "runtime")).
-			BinariesPath(filepath.Join(dataPath, "bin")).
+			RuntimePath(filepath.Join(cacheDir, "runtime")).
+			BinariesPath(filepath.Join(cacheDir, "bin")).
 			Username("postgres").
 			Password("postgres").
 			Database("flowcatalyst").

@@ -16,6 +16,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -60,6 +61,10 @@ type State struct {
 	// middleware layer still applies when mounted).
 	RateLimit         ratelimit.Store
 	RateLimitPolicies ratelimit.Policies
+	// ClientGovernor is the per-instance in-memory per-client_id limiter
+	// checked before the distributed RateLimit on /oauth/token (sheds a
+	// flood locally before the network round-trip). Optional (nil skips it).
+	ClientGovernor *ratelimit.Governor
 }
 
 // recordAttempt best-effort logs a login attempt; failures are swallowed
@@ -127,12 +132,20 @@ func (s *State) Token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cluster-wide per-client_id throttle. Runs before the DB lookup so a
-	// client spamming us can't amplify load on the client cache. Composes
-	// with the per-IP middleware wrapping /oauth/*.
+	// Per-client_id throttle. Runs before the DB lookup so a client
+	// spamming us can't amplify load on the client cache. The in-memory
+	// governor sheds a local flood first; the distributed Store is the
+	// cluster-wide ceiling. Composes with the per-IP middleware wrapping
+	// /oauth/*.
 	if req.ClientID != "" {
+		if s.ClientGovernor != nil {
+			if ok, retry := s.ClientGovernor.Check(req.ClientID); !ok {
+				writeOAuthRateLimited(w, retry, "this client_id has exceeded its token endpoint rate limit")
+				return
+			}
+		}
 		if rej := ratelimit.Enforce(r.Context(), s.RateLimit, ratelimit.BucketOAuthTokenClient, req.ClientID, s.RateLimitPolicies.OAuthTokenClient); rej != nil {
-			ratelimit.WriteTooManyRequests(w, rej.RetryAfterSecs, "this client_id has exceeded its token endpoint rate limit")
+			writeOAuthRateLimited(w, rej.RetryAfterSecs, "this client_id has exceeded its token endpoint rate limit")
 			return
 		}
 	}
@@ -577,6 +590,19 @@ func newOAuthError(status int, code, description string) *oauthError {
 
 func (e *oauthError) write(w http.ResponseWriter) {
 	writeOAuthError(w, e.status, e.Code, derefOr(e.Description, ""))
+}
+
+// writeOAuthRateLimited emits a 429 in the RFC-6749 error shape the token
+// endpoint uses ({"error":"rate_limit_exceeded", "error_description":...})
+// with a Retry-After header — matching Rust's rate-limit rejection on
+// /oauth/token, distinct from the platform {"error":"TOO_MANY_REQUESTS"}
+// envelope used by non-OAuth endpoints.
+func writeOAuthRateLimited(w http.ResponseWriter, retryAfterSecs uint32, description string) {
+	if retryAfterSecs < 1 {
+		retryAfterSecs = 1
+	}
+	w.Header().Set("Retry-After", strconv.FormatUint(uint64(retryAfterSecs), 10))
+	writeOAuthError(w, http.StatusTooManyRequests, "rate_limit_exceeded", description)
 }
 
 func writeOAuthError(w http.ResponseWriter, status int, code, description string) {

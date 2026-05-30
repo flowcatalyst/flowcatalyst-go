@@ -186,7 +186,15 @@ func (s *State) list(ctx context.Context, in *listInput) (*listOutput, error) {
 		filters.Status = &in.Status
 	}
 	if in.ClientID != "" {
-		filters.ClientID = &in.ClientID
+		// The literal "platform" selects platform-scoped jobs (client_id IS
+		// NULL), which the repo expresses as a pointer-to-"". Mirrors the
+		// Rust list handler's Some("platform") => Some(None) mapping.
+		if in.ClientID == "platform" {
+			empty := ""
+			filters.ClientID = &empty
+		} else {
+			filters.ClientID = &in.ClientID
+		}
 	}
 	if in.Search != "" {
 		filters.Search = &in.Search
@@ -209,7 +217,11 @@ func (s *State) list(ctx context.Context, in *listInput) (*listOutput, error) {
 	}
 	out := make([]ScheduledJobResponse, 0, len(rows))
 	for i := range rows {
-		out = append(out, fromEntity(&rows[i]))
+		resp := fromEntity(&rows[i])
+		if active, err := s.Instances.HasActiveInstance(ctx, rows[i].ID); err == nil {
+			resp.HasActiveInstance = active
+		}
+		out = append(out, resp)
 	}
 	page := apicommon.NewOffsetPage(out, in.PageIndex(), in.PageSizeVal(), total)
 	return &listOutput{Body: page}, nil
@@ -238,7 +250,11 @@ func (s *State) getByID(ctx context.Context, in *getInput) (*getOutput, error) {
 	if j.ClientID != nil && !ac.CanAccessClient(*j.ClientID) {
 		return nil, httperror.Forbidden("No access to this scheduled job")
 	}
-	return &getOutput{Body: fromEntity(j)}, nil
+	resp := fromEntity(j)
+	if active, err := s.Instances.HasActiveInstance(ctx, j.ID); err == nil {
+		resp.HasActiveInstance = active
+	}
+	return &getOutput{Body: resp}, nil
 }
 
 type createInput struct {
@@ -268,6 +284,21 @@ func (s *State) create(ctx context.Context, in *createInput) (*createOutput, err
 	return &createOutput{Body: apicommon.CreatedResponse{ID: committed.Event().ScheduledJobID}}, nil
 }
 
+// requireScopeByID loads the scheduled job and enforces per-resource scope
+// (A2) on top of the coarse permission already checked: a non-anchor principal
+// must not mutate another tenant's scheduled job by id. Mirrors Rust
+// check_scope_access(auth, job.client_id).
+func (s *State) requireScopeByID(ctx context.Context, ac *auth.AuthContext, id string) error {
+	j, err := s.Repo.FindByID(ctx, id)
+	if err != nil {
+		return usecase.Internal("REPO", "find_by_id failed", err)
+	}
+	if j == nil {
+		return httperror.NotFound("ScheduledJob", id)
+	}
+	return auth.CheckScopeAccess(ac, j.ClientID)
+}
+
 type updateInput struct {
 	ID   string `path:"id"`
 	Body UpdateScheduledJobRequest
@@ -278,6 +309,9 @@ type emptyOutput struct{}
 func (s *State) update(ctx context.Context, in *updateInput) (*emptyOutput, error) {
 	ac := auth.FromContext(ctx)
 	if err := auth.CanWriteScheduledJobs(ac); err != nil {
+		return nil, err
+	}
+	if err := s.requireScopeByID(ctx, ac, in.ID); err != nil {
 		return nil, err
 	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
@@ -296,6 +330,9 @@ func (s *State) pause(ctx context.Context, in *idInput) (*emptyOutput, error) {
 	if err := auth.CanWriteScheduledJobs(ac); err != nil {
 		return nil, err
 	}
+	if err := s.requireScopeByID(ctx, ac, in.ID); err != nil {
+		return nil, err
+	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
 	if _, err := operations.PauseScheduledJob(ctx, s.Repo, s.UoW, operations.PauseCommand{ID: in.ID}, ec); err != nil {
 		return nil, err
@@ -306,6 +343,9 @@ func (s *State) pause(ctx context.Context, in *idInput) (*emptyOutput, error) {
 func (s *State) resume(ctx context.Context, in *idInput) (*emptyOutput, error) {
 	ac := auth.FromContext(ctx)
 	if err := auth.CanWriteScheduledJobs(ac); err != nil {
+		return nil, err
+	}
+	if err := s.requireScopeByID(ctx, ac, in.ID); err != nil {
 		return nil, err
 	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
@@ -320,6 +360,9 @@ func (s *State) archive(ctx context.Context, in *idInput) (*emptyOutput, error) 
 	if err := auth.CanWriteScheduledJobs(ac); err != nil {
 		return nil, err
 	}
+	if err := s.requireScopeByID(ctx, ac, in.ID); err != nil {
+		return nil, err
+	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
 	if _, err := operations.ArchiveScheduledJob(ctx, s.Repo, s.UoW, operations.ArchiveCommand{ID: in.ID}, ec); err != nil {
 		return nil, err
@@ -327,17 +370,30 @@ func (s *State) archive(ctx context.Context, in *idInput) (*emptyOutput, error) 
 	return &emptyOutput{}, nil
 }
 
+type fireNowInput struct {
+	ID   string `path:"id"`
+	Body *FireNowRequest
+}
+
 type fireNowOutput struct {
 	Body FireNowResponse
 }
 
-func (s *State) fireNow(ctx context.Context, in *idInput) (*fireNowOutput, error) {
+func (s *State) fireNow(ctx context.Context, in *fireNowInput) (*fireNowOutput, error) {
 	ac := auth.FromContext(ctx)
 	if err := auth.CanFireScheduledJobs(ac); err != nil {
 		return nil, err
 	}
+	if err := s.requireScopeByID(ctx, ac, in.ID); err != nil {
+		return nil, err
+	}
+	var correlationID *string
+	if in.Body != nil {
+		correlationID = in.Body.CorrelationID
+	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
-	committed, err := operations.FireNow(ctx, s.Repo, s.UoW, operations.FireNowCommand{ID: in.ID}, ec)
+	committed, err := operations.FireNow(ctx, s.Repo, s.Instances, s.UoW,
+		operations.FireNowCommand{ID: in.ID, CorrelationID: correlationID}, ec)
 	if err != nil {
 		return nil, err
 	}
@@ -350,6 +406,9 @@ func (s *State) fireNow(ctx context.Context, in *idInput) (*fireNowOutput, error
 func (s *State) delete(ctx context.Context, in *idInput) (*emptyOutput, error) {
 	ac := auth.FromContext(ctx)
 	if err := auth.CanDeleteScheduledJobs(ac); err != nil {
+		return nil, err
+	}
+	if err := s.requireScopeByID(ctx, ac, in.ID); err != nil {
 		return nil, err
 	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
@@ -385,7 +444,11 @@ func (s *State) getByCode(ctx context.Context, in *byCodeInput) (*getOutput, err
 	if j.ClientID != nil && !ac.CanAccessClient(*j.ClientID) {
 		return nil, httperror.Forbidden("No access to this scheduled job")
 	}
-	return &getOutput{Body: fromEntity(j)}, nil
+	resp := fromEntity(j)
+	if active, err := s.Instances.HasActiveInstance(ctx, j.ID); err == nil {
+		resp.HasActiveInstance = active
+	}
+	return &getOutput{Body: resp}, nil
 }
 
 // ── instance endpoints ──────────────────────────────────────────────────
@@ -505,6 +568,9 @@ func (s *State) writeInstanceLog(ctx context.Context, in *writeLogInput) (*empty
 	if inst == nil {
 		return nil, httperror.NotFound("ScheduledJobInstance", in.InstanceID)
 	}
+	if err := auth.CheckScopeAccess(ac, inst.ClientID); err != nil { // A2: per-instance client scope
+		return nil, err
+	}
 	log := &scheduledjob.ScheduledJobInstanceLog{
 		ID:             tsid.Generate(tsid.ScheduledJobInstanceLog),
 		InstanceID:     in.InstanceID,
@@ -532,6 +598,16 @@ func (s *State) completeInstance(ctx context.Context, in *completeInstanceInput)
 	}
 	if s.Instances == nil {
 		return nil, usecase.Internal("WIRING", "instances repo not configured", nil)
+	}
+	inst, err := s.Instances.FindByID(ctx, in.InstanceID)
+	if err != nil {
+		return nil, usecase.Internal("REPO", "find_instance failed", err)
+	}
+	if inst == nil {
+		return nil, httperror.NotFound("ScheduledJobInstance", in.InstanceID)
+	}
+	if err := auth.CheckScopeAccess(ac, inst.ClientID); err != nil { // A2: per-instance client scope
+		return nil, err
 	}
 	status := scheduledjob.InstanceStatusCompleted
 	if in.Body.Status != "" {

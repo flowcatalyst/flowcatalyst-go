@@ -28,6 +28,9 @@ func TestPrometheusHandler_EmitsExpectedMetrics(t *testing.T) {
 				AvgMs: 25.0, P50Ms: 20, P95Ms: 80, P99Ms: 95, SampleCount: 102,
 			},
 		},
+		Histogram: router.MediationHistogram{
+			Bounds: []float64{0.1, 1}, Counts: []uint64{80, 100}, SumSeconds: 2.5, Count: 102,
+		},
 	}}}
 	state := &routerapi.State{PoolStats: pools, Mocks: routerapi.NewMockState()}
 
@@ -44,15 +47,15 @@ func TestPrometheusHandler_EmitsExpectedMetrics(t *testing.T) {
 	// Spot-check a representative slice of the exposition. Each line
 	// here exercises a different code path (gauge / counter / labeled).
 	want := []string{
-		`fc_router_pool_active_workers{pool="demo"} 3`,
-		`fc_router_pool_queue_size{pool="demo"} 5`,
-		`fc_router_pool_concurrency{pool="demo"} 10`,
-		`fc_router_pool_messages_total{outcome="success",pool="demo"} 100`,
-		`fc_router_pool_messages_total{outcome="failure",pool="demo"} 2`,
-		`fc_router_pool_messages_total{outcome="rate_limited",pool="demo"} 1`,
-		`fc_router_pool_processing_time_ms{pool="demo",quantile="0.5"} 20`,
-		`fc_router_pool_processing_time_ms{pool="demo",quantile="0.95"} 80`,
-		`fc_router_pool_processing_time_ms{pool="demo",quantile="0.99"} 95`,
+		`fc_pool_active_workers{pool="demo"} 3`,
+		`fc_pool_queue_size{pool="demo"} 5`,
+		`fc_pool_message_groups{pool="demo"} 2`,
+		`fc_messages_processed_total{pool="demo",success="true"} 100`,
+		`fc_messages_processed_total{pool="demo",success="false"} 2`,
+		`fc_rate_limit_exceeded_total{pool="demo"} 1`,
+		`fc_mediation_duration_seconds_bucket{pool="demo",le="0.1"} 80`,
+		`fc_mediation_duration_seconds_sum{pool="demo"} 2.5`,
+		`fc_mediation_duration_seconds_count{pool="demo"} 102`,
 	}
 	for _, s := range want {
 		if !strings.Contains(body, s) {
@@ -81,10 +84,10 @@ func TestPrometheusHandler_EmitsBreakerAndInFlight(t *testing.T) {
 	body := rec.Body.String()
 
 	for _, s := range []string{
-		`fc_router_circuit_breaker_open{target="target-a"} 1`,
-		`fc_router_circuit_breaker_calls_total{outcome="success",target="target-a"} 5`,
-		`fc_router_circuit_breaker_calls_total{outcome="failure",target="target-a"} 7`,
-		`fc_router_in_flight_total 2`,
+		`fc_circuit_breaker_open{target="target-a"} 1`,
+		`fc_circuit_breaker_calls_total{outcome="success",target="target-a"} 5`,
+		`fc_circuit_breaker_calls_total{outcome="failure",target="target-a"} 7`,
+		`fc_in_pipeline_messages 2`,
 	} {
 		if !strings.Contains(body, s) {
 			t.Errorf("missing %q in:\n%s", s, body)

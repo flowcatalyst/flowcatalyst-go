@@ -1,33 +1,43 @@
-// Package postgres is the Postgres-backed queue backend. Mirrors the
-// Rust fc-queue postgres feature: messages stored in a fc_queue_messages
-// table with claim semantics via SELECT FOR UPDATE SKIP LOCKED.
+// Package postgres is the Postgres-backed queue backend. It is wire- and
+// schema-compatible with the Rust fc-queue Postgres backend so a Go router
+// can be dropped into an existing deployment and drain the SAME
+// queue_messages table that the existing producers write to (and vice
+// versa).
 //
-// Schema (created by InitSchema):
+// Schema (created by InitSchema; matches crates/fc-queue/src/postgres.rs):
 //
-//	CREATE TABLE fc_queue_messages (
-//	    id              TEXT PRIMARY KEY,
-//	    queue_name      TEXT NOT NULL,
-//	    body            JSONB NOT NULL,
-//	    visible_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-//	    receipt_handle  TEXT,
-//	    received_count  INT NOT NULL DEFAULT 0,
-//	    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+//	CREATE TABLE queue_messages (
+//	    id               TEXT NOT NULL,
+//	    queue_name       TEXT NOT NULL,
+//	    message_group_id TEXT,
+//	    receipt_handle   TEXT,
+//	    visible_at       BIGINT NOT NULL,   -- unix epoch seconds
+//	    payload          TEXT NOT NULL,     -- JSON-encoded common.Message
+//	    created_at       BIGINT NOT NULL,   -- unix epoch seconds
+//	    receive_count    INTEGER DEFAULT 0,
+//	    PRIMARY KEY (queue_name, id)
 //	);
-//	CREATE INDEX fc_queue_messages_pending_idx
-//	    ON fc_queue_messages (queue_name, visible_at)
-//	    WHERE receipt_handle IS NULL;
+//	CREATE INDEX idx_queue_visible
+//	    ON queue_messages (queue_name, visible_at, message_group_id);
+//
+// Semantics (mirrors Rust):
+//   - Claim is keyed on visible_at, NOT on receipt_handle being NULL. A
+//     claimed message becomes eligible again once its visibility window
+//     lapses, so a crashed consumer's messages are redelivered (at-least-once)
+//     without an explicit NACK.
+//   - FIFO per message group: only the earliest visible message of each
+//     group (COALESCE(message_group_id, id)) is eligible at a time, so a
+//     NULL group behaves as a singleton keyed by the message id.
 package postgres
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/flowcatalyst/flowcatalyst-go/internal/common"
@@ -69,52 +79,75 @@ type Queue struct {
 // Identifier returns the queue name.
 func (q *Queue) Identifier() string { return q.cfg.Name }
 
-// InitSchema creates the queue table and indexes.
+// InitSchema creates the queue table and index (idempotent). The DDL
+// matches the Rust backend exactly so it is a no-op when the table was
+// already provisioned by the existing system.
 func (q *Queue) InitSchema(ctx context.Context) error {
 	const ddl = `
-CREATE TABLE IF NOT EXISTS fc_queue_messages (
-    id             TEXT PRIMARY KEY,
-    queue_name     TEXT NOT NULL,
-    body           JSONB NOT NULL,
-    visible_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    receipt_handle TEXT,
-    received_count INT NOT NULL DEFAULT 0,
-    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+CREATE TABLE IF NOT EXISTS queue_messages (
+    id               TEXT NOT NULL,
+    queue_name       TEXT NOT NULL,
+    message_group_id TEXT,
+    receipt_handle   TEXT,
+    visible_at       BIGINT NOT NULL,
+    payload          TEXT NOT NULL,
+    created_at       BIGINT NOT NULL,
+    receive_count    INTEGER DEFAULT 0,
+    PRIMARY KEY (queue_name, id)
 );
-CREATE INDEX IF NOT EXISTS fc_queue_messages_pending_idx
-    ON fc_queue_messages (queue_name, visible_at)
-    WHERE receipt_handle IS NULL;
+CREATE INDEX IF NOT EXISTS idx_queue_visible
+    ON queue_messages (queue_name, visible_at, message_group_id);
 `
 	_, err := q.pool.Exec(ctx, ddl)
 	return err
 }
 
-// Poll claims up to maxMessages messages from this queue.
+// Poll claims up to maxMessages eligible messages from this queue.
+//
+// Eligibility = visible_at <= now AND the message is the earliest visible
+// message in its group (COALESCE(message_group_id, id)). Each claimed row
+// gets a unique receipt handle (<pollUUID>:<id>) and its visibility window
+// is pushed out by the configured timeout. We use a correlated NOT EXISTS
+// rather than a windowed CTE because FOR UPDATE SKIP LOCKED cannot be
+// applied over a ROW_NUMBER() result under Postgres CTE inlining; the
+// resulting claim set is equivalent.
 func (q *Queue) Poll(ctx context.Context, maxMessages uint32) ([]common.QueuedMessage, error) {
-	receipt := uuid.NewString()
 	visibility := time.Duration(q.cfg.VisibilityTimeout) * time.Second
 	if visibility <= 0 {
 		visibility = 30 * time.Second
 	}
+	now := time.Now().Unix()
+	newVisibleAt := now + int64(visibility.Seconds())
+	receipt := uuid.NewString()
+
 	const sql = `
 WITH claimed AS (
-  SELECT id FROM fc_queue_messages
-  WHERE queue_name = $1
-    AND visible_at <= NOW()
-    AND receipt_handle IS NULL
-  ORDER BY visible_at
-  LIMIT $2
-  FOR UPDATE SKIP LOCKED
+  SELECT m.id
+    FROM queue_messages m
+   WHERE m.queue_name = $1
+     AND m.visible_at <= $2
+     AND NOT EXISTS (
+           SELECT 1 FROM queue_messages e
+            WHERE e.queue_name = m.queue_name
+              AND COALESCE(e.message_group_id, e.id) = COALESCE(m.message_group_id, m.id)
+              AND e.visible_at <= $2
+              AND (e.created_at < m.created_at
+                   OR (e.created_at = m.created_at AND e.id < m.id))
+         )
+   ORDER BY m.created_at, m.id
+   LIMIT $3
+   FOR UPDATE SKIP LOCKED
 )
-UPDATE fc_queue_messages m
-   SET receipt_handle = $3,
-       visible_at     = NOW() + $4 * INTERVAL '1 second',
-       received_count = received_count + 1
+UPDATE queue_messages t
+   SET receipt_handle = $4 || ':' || t.id,
+       visible_at     = $5,
+       receive_count  = t.receive_count + 1
   FROM claimed
- WHERE m.id = claimed.id
- RETURNING m.id, m.body
+ WHERE t.queue_name = $1
+   AND t.id = claimed.id
+ RETURNING t.id, t.payload
 `
-	rows, err := q.pool.Query(ctx, sql, q.cfg.Name, maxMessages, receipt, int(visibility.Seconds()))
+	rows, err := q.pool.Query(ctx, sql, q.cfg.Name, now, int64(maxMessages), receipt, newVisibleAt)
 	if err != nil {
 		return nil, fmt.Errorf("postgres queue poll: %w", err)
 	}
@@ -123,12 +156,12 @@ UPDATE fc_queue_messages m
 	var msgs []common.QueuedMessage
 	for rows.Next() {
 		var id string
-		var body []byte
-		if err := rows.Scan(&id, &body); err != nil {
+		var payload string
+		if err := rows.Scan(&id, &payload); err != nil {
 			return nil, err
 		}
 		var m common.Message
-		if err := json.Unmarshal(body, &m); err != nil {
+		if err := json.Unmarshal([]byte(payload), &m); err != nil {
 			return nil, fmt.Errorf("unmarshal message %s: %w", id, err)
 		}
 		msgs = append(msgs, common.QueuedMessage{
@@ -144,13 +177,14 @@ UPDATE fc_queue_messages m
 
 // Ack deletes the message permanently.
 func (q *Queue) Ack(ctx context.Context, receipt string) error {
-	id := messageIDFromReceipt(receipt)
-	if id == "" {
-		return errors.New("ack: malformed receipt handle")
-	}
-	_, err := q.pool.Exec(ctx, `DELETE FROM fc_queue_messages WHERE id = $1`, id)
+	tag, err := q.pool.Exec(ctx,
+		`DELETE FROM queue_messages WHERE receipt_handle = $1 AND queue_name = $2`,
+		receipt, q.cfg.Name)
 	if err != nil {
 		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("ack: %w", errNotFound(receipt))
 	}
 	q.acked.Add(1)
 	return nil
@@ -176,62 +210,39 @@ func (q *Queue) Defer(ctx context.Context, receipt string, delaySeconds *uint32)
 
 // ExtendVisibility prolongs the visibility window without releasing.
 func (q *Queue) ExtendVisibility(ctx context.Context, receipt string, seconds uint32) error {
-	id := messageIDFromReceipt(receipt)
-	if id == "" {
-		return errors.New("extend: malformed receipt handle")
-	}
+	newVisibleAt := time.Now().Unix() + int64(seconds)
 	_, err := q.pool.Exec(ctx,
-		`UPDATE fc_queue_messages SET visible_at = NOW() + $1 * INTERVAL '1 second' WHERE id = $2`,
-		seconds, id)
+		`UPDATE queue_messages SET visible_at = $1 WHERE receipt_handle = $2 AND queue_name = $3`,
+		newVisibleAt, receipt, q.cfg.Name)
 	return err
 }
 
-// Publish writes a single message.
+// Publish writes a single message. Uses ON CONFLICT DO NOTHING so a
+// duplicate id is a no-op (matches Rust at-least-once publish semantics).
 func (q *Queue) Publish(ctx context.Context, m common.Message) (string, error) {
-	body, err := json.Marshal(m)
+	payload, err := json.Marshal(m)
 	if err != nil {
 		return "", err
 	}
-	id := uuid.NewString()
+	now := time.Now().Unix()
 	_, err = q.pool.Exec(ctx,
-		`INSERT INTO fc_queue_messages (id, queue_name, body) VALUES ($1, $2, $3::jsonb)`,
-		id, q.cfg.Name, body)
-	return id, err
+		`INSERT INTO queue_messages
+		     (id, queue_name, message_group_id, visible_at, payload, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 ON CONFLICT (queue_name, id) DO NOTHING`,
+		m.ID, q.cfg.Name, m.MessageGroupID, now, string(payload), now)
+	return m.ID, err
 }
 
-// PublishBatch writes a batch of messages in one transaction.
+// PublishBatch writes a batch of messages (loops Publish, matching Rust).
 func (q *Queue) PublishBatch(ctx context.Context, msgs []common.Message) ([]string, error) {
-	tx, err := q.pool.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
 	ids := make([]string, 0, len(msgs))
-	batch := &pgx.Batch{}
 	for _, m := range msgs {
-		body, err := json.Marshal(m)
+		id, err := q.Publish(ctx, m)
 		if err != nil {
 			return nil, err
 		}
-		id := uuid.NewString()
 		ids = append(ids, id)
-		batch.Queue(
-			`INSERT INTO fc_queue_messages (id, queue_name, body) VALUES ($1, $2, $3::jsonb)`,
-			id, q.cfg.Name, body)
-	}
-	br := tx.SendBatch(ctx, batch)
-	for range msgs {
-		if _, err := br.Exec(); err != nil {
-			_ = br.Close()
-			return nil, err
-		}
-	}
-	if err := br.Close(); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
 	}
 	return ids, nil
 }
@@ -248,13 +259,14 @@ func (q *Queue) Stop() { q.pool.Close() }
 
 // Metrics returns broker-side metrics. Reads counts from the table.
 func (q *Queue) Metrics(ctx context.Context) (*queue.Metrics, error) {
+	now := time.Now().Unix()
 	var pending, inflight uint64
 	err := q.pool.QueryRow(ctx,
 		`SELECT
-		   COUNT(*) FILTER (WHERE receipt_handle IS NULL AND visible_at <= NOW()),
+		   COUNT(*) FILTER (WHERE receipt_handle IS NULL AND visible_at <= $2),
 		   COUNT(*) FILTER (WHERE receipt_handle IS NOT NULL)
-		 FROM fc_queue_messages WHERE queue_name = $1`,
-		q.cfg.Name,
+		 FROM queue_messages WHERE queue_name = $1`,
+		q.cfg.Name, now,
 	).Scan(&pending, &inflight)
 	if err != nil {
 		return nil, err
@@ -282,28 +294,20 @@ func (q *Queue) Counters() *queue.Metrics {
 }
 
 func (q *Queue) makeVisible(ctx context.Context, receipt string, delaySeconds *uint32) error {
-	id := messageIDFromReceipt(receipt)
-	if id == "" {
-		return errors.New("malformed receipt handle")
-	}
-	delay := uint32(0)
+	delay := int64(0)
 	if delaySeconds != nil {
-		delay = *delaySeconds
+		delay = int64(*delaySeconds)
 	}
+	newVisibleAt := time.Now().Unix() + delay
 	_, err := q.pool.Exec(ctx,
-		`UPDATE fc_queue_messages
+		`UPDATE queue_messages
 		    SET receipt_handle = NULL,
-		        visible_at = NOW() + $1 * INTERVAL '1 second'
-		  WHERE id = $2`,
-		delay, id)
+		        visible_at = $1
+		  WHERE receipt_handle = $2 AND queue_name = $3`,
+		newVisibleAt, receipt, q.cfg.Name)
 	return err
 }
 
-func messageIDFromReceipt(r string) string {
-	for i := range len(r) {
-		if r[i] == ':' {
-			return r[i+1:]
-		}
-	}
-	return ""
+func errNotFound(receipt string) error {
+	return fmt.Errorf("receipt handle not found: %s", receipt)
 }

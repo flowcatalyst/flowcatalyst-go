@@ -10,36 +10,41 @@ import (
 	"github.com/flowcatalyst/flowcatalyst-go/internal/router"
 )
 
-// PrometheusHandler returns an http.Handler that emits the router's
-// metrics in Prometheus text exposition format. Every call collects a
-// fresh snapshot — no background goroutine, no global mutable state.
+// PrometheusHandler returns an http.Handler that emits the router's metrics
+// in Prometheus text exposition format. Every call collects a fresh snapshot
+// — no background goroutine, no global mutable state.
 //
-// Mounted by cmd/fc-router/main.go at /metrics (and /q/metrics for the
-// k8s-alias namespace).
+// The metric NAMES + label schema match the Rust router (router_metrics.rs)
+// so Rust-targeted dashboards/alerts work against the Go router:
 //
-// Gauges (point-in-time):
-//   - fc_router_pool_active_workers{pool}
-//   - fc_router_pool_queue_size{pool}
-//   - fc_router_pool_concurrency{pool}
-//   - fc_router_pool_message_groups{pool}
-//   - fc_router_pool_rate_limited{pool}        (1/0)
-//   - fc_router_queue_pending_messages{queue}
-//   - fc_router_queue_in_flight_messages{queue}
-//   - fc_router_circuit_breaker_open{target}   (1/0)
-//   - fc_router_in_flight_total
+// Per pool (label: pool):
+//   - fc_pool_queue_size, fc_pool_active_workers, fc_pool_message_groups (gauges)
+//   - fc_messages_processed_total{success}                              (counter)
+//   - fc_rate_limit_exceeded_total                                      (counter)
+//   - fc_mediation_duration_seconds                                     (histogram)
 //
-// Counters (cumulative):
-//   - fc_router_pool_messages_total{pool,outcome=success|failure|rate_limited}
-//   - fc_router_queue_messages_total{queue,outcome=polled|acked|nacked|deferred}
+// Global:
+//   - fc_in_pipeline_messages                                          (gauge)
 //
-// Latency:
-//   - fc_router_pool_processing_time_ms_avg{pool}
-//   - fc_router_pool_processing_time_ms{pool,quantile=0.5|0.95|0.99}
+// Per queue/consumer:
+//   - fc_queue_pending_messages, fc_queue_in_flight_messages           (gauges)
+//   - fc_consumer_messages_received_total{consumer}                    (counter)
+//   - fc_queue_messages_total{queue,outcome=acked|nacked|deferred}     (counter)
+//
+// Circuit breaker (label: target):
+//   - fc_circuit_breaker_open                                          (gauge)
+//   - fc_circuit_breaker_calls_total{outcome=success|failure}          (counter)
+//
+// Note (Rust parity gap, dashboards only): Rust additionally emits
+// fc_messages_submitted_total, fc_messages_rejected_total{reason},
+// fc_consumer_polls_total / fc_consumer_errors_total{type}, the `result`
+// label on fc_messages_processed_total, and flowcatalyst_broker_*. Those are
+// event-time labeled counters the Go pull-based collector does not currently
+// track; emitting them faithfully needs the metrics collector reworked to the
+// Rust push model. The primary panels above are covered.
 func PrometheusHandler(s *State) http.Handler {
 	registry := prometheus.NewRegistry()
-	collector := &routerCollector{state: s}
-	registry.MustRegister(collector)
-
+	registry.MustRegister(&routerCollector{state: s})
 	return promhttp.HandlerFor(registry, promhttp.HandlerOpts{
 		ErrorLog:      nil,
 		ErrorHandling: promhttp.ContinueOnError,
@@ -50,12 +55,10 @@ type routerCollector struct {
 	state *State
 }
 
-// Describe implements prometheus.Collector. The exposition format lets
-// us emit metrics with descriptions assembled on the fly, so we leave
-// this as a no-op — equivalent to the "untyped collector" pattern.
+// Describe is a no-op (untyped/const-metric collector pattern).
 func (c *routerCollector) Describe(_ chan<- *prometheus.Desc) {}
 
-// Collect builds one snapshot per scrape. Cheap: ~tens of µs.
+// Collect builds one snapshot per scrape.
 func (c *routerCollector) Collect(ch chan<- prometheus.Metric) {
 	c.collectPools(ch)
 	c.collectQueues(ch)
@@ -67,58 +70,44 @@ func (c *routerCollector) collectPools(ch chan<- prometheus.Metric) {
 	if c.state.PoolStats == nil {
 		return
 	}
-	stats := c.state.PoolStats.PoolStats()
-
-	for _, s := range stats {
-		labels := []string{"pool"}
-		labelValues := []string{s.PoolCode}
-
-		gauge(ch, "fc_router_pool_active_workers",
-			"Currently active worker goroutines per pool.",
-			float64(s.ActiveWorkers), labels, labelValues)
-		gauge(ch, "fc_router_pool_queue_size",
+	poolLabel := []string{"pool"}
+	for _, s := range c.state.PoolStats.PoolStats() {
+		lv := []string{s.PoolCode}
+		gauge(ch, "fc_pool_queue_size",
 			"Messages buffered in group queues awaiting dispatch.",
-			float64(s.QueueSize), labels, labelValues)
-		gauge(ch, "fc_router_pool_concurrency",
-			"Configured concurrency cap.",
-			float64(s.Concurrency), labels, labelValues)
-		gauge(ch, "fc_router_pool_message_groups",
+			float64(s.QueueSize), poolLabel, lv)
+		gauge(ch, "fc_pool_active_workers",
+			"Currently active worker goroutines per pool.",
+			float64(s.ActiveWorkers), poolLabel, lv)
+		gauge(ch, "fc_pool_message_groups",
 			"Distinct message groups currently holding buffered work.",
-			float64(s.MessageGroupCount), labels, labelValues)
-		gauge(ch, "fc_router_pool_rate_limited",
-			"1 if the pool's rate limiter has no tokens right now.",
-			boolFloat(s.IsRateLimited), labels, labelValues)
+			float64(s.MessageGroupCount), poolLabel, lv)
 
-		if s.Metrics == nil {
-			continue
+		if s.Metrics != nil {
+			m := s.Metrics
+			counter(ch, "fc_messages_processed_total",
+				"Cumulative messages processed, by success.",
+				float64(m.TotalSuccess), []string{"pool", "success"}, []string{s.PoolCode, "true"})
+			counter(ch, "fc_messages_processed_total",
+				"Cumulative messages processed, by success.",
+				float64(m.TotalFailure), []string{"pool", "success"}, []string{s.PoolCode, "false"})
+			counter(ch, "fc_rate_limit_exceeded_total",
+				"Cumulative rate-limit events.",
+				float64(m.TotalRateLimited), poolLabel, lv)
 		}
-		m := s.Metrics
 
-		counter(ch, "fc_router_pool_messages_total",
-			"Cumulative count of pool delivery outcomes.",
-			float64(m.TotalSuccess),
-			[]string{"pool", "outcome"}, []string{s.PoolCode, "success"})
-		counter(ch, "fc_router_pool_messages_total",
-			"Cumulative count of pool delivery outcomes.",
-			float64(m.TotalFailure),
-			[]string{"pool", "outcome"}, []string{s.PoolCode, "failure"})
-		counter(ch, "fc_router_pool_messages_total",
-			"Cumulative count of pool delivery outcomes.",
-			float64(m.TotalRateLimited),
-			[]string{"pool", "outcome"}, []string{s.PoolCode, "rate_limited"})
-
-		gauge(ch, "fc_router_pool_processing_time_ms_avg",
-			"Mean processing time (all-time) in milliseconds.",
-			m.ProcessingTime.AvgMs, labels, labelValues)
-
-		for q, v := range map[string]float64{
-			"0.5":  float64(m.ProcessingTime.P50Ms),
-			"0.95": float64(m.ProcessingTime.P95Ms),
-			"0.99": float64(m.ProcessingTime.P99Ms),
-		} {
-			gauge(ch, "fc_router_pool_processing_time_ms",
-				"All-time processing time percentile in milliseconds.",
-				v, []string{"pool", "quantile"}, []string{s.PoolCode, q})
+		// fc_mediation_duration_seconds — cumulative histogram.
+		h := s.Histogram
+		if len(h.Bounds) > 0 {
+			buckets := make(map[float64]uint64, len(h.Bounds))
+			for i, b := range h.Bounds {
+				if i < len(h.Counts) {
+					buckets[b] = h.Counts[i]
+				}
+			}
+			desc := prometheus.NewDesc("fc_mediation_duration_seconds",
+				"Mediation latency in seconds.", poolLabel, nil)
+			ch <- prometheus.MustNewConstHistogram(desc, h.Count, h.SumSeconds, buckets, lv...)
 		}
 	}
 }
@@ -128,27 +117,25 @@ func (c *routerCollector) collectQueues(ch chan<- prometheus.Metric) {
 		return
 	}
 	for _, m := range c.state.BrokerStats.GetWindowed(0) {
-		labels := []string{"queue"}
-		labelValues := []string{normaliseQueueID(m.QueueIdentifier)}
-
-		gauge(ch, "fc_router_queue_pending_messages",
+		q := normaliseQueueID(m.QueueIdentifier)
+		gauge(ch, "fc_queue_pending_messages",
 			"Approximate messages waiting on the broker.",
-			float64(m.PendingMessages), labels, labelValues)
-		gauge(ch, "fc_router_queue_in_flight_messages",
+			float64(m.PendingMessages), []string{"queue"}, []string{q})
+		gauge(ch, "fc_queue_in_flight_messages",
 			"Approximate messages currently being processed by consumers.",
-			float64(m.InFlightMessages), labels, labelValues)
+			float64(m.InFlightMessages), []string{"queue"}, []string{q})
+		counter(ch, "fc_consumer_messages_received_total",
+			"Cumulative messages received from the broker by this consumer.",
+			float64(m.TotalPolled), []string{"consumer"}, []string{q})
 
 		for outcome, v := range map[string]uint64{
-			"polled":   m.TotalPolled,
 			"acked":    m.TotalAcked,
 			"nacked":   m.TotalNacked,
 			"deferred": m.TotalDeferred,
 		} {
-			counter(ch, "fc_router_queue_messages_total",
-				"Cumulative count of consumer outcomes.",
-				float64(v),
-				[]string{"queue", "outcome"},
-				[]string{normaliseQueueID(m.QueueIdentifier), outcome})
+			counter(ch, "fc_queue_messages_total",
+				"Cumulative consumer ack/nack/defer outcomes.",
+				float64(v), []string{"queue", "outcome"}, []string{q, outcome})
 		}
 	}
 }
@@ -158,15 +145,15 @@ func (c *routerCollector) collectBreakers(ch chan<- prometheus.Metric) {
 		return
 	}
 	for name, st := range c.state.Breakers.Snapshot() {
-		gauge(ch, "fc_router_circuit_breaker_open",
+		gauge(ch, "fc_circuit_breaker_open",
 			"1 when the breaker is OPEN, 0 otherwise.",
 			boolFloat(st.State == router.CircuitOpen),
 			[]string{"target"}, []string{name})
-		counter(ch, "fc_router_circuit_breaker_calls_total",
+		counter(ch, "fc_circuit_breaker_calls_total",
 			"Cumulative breaker outcomes.",
 			float64(st.Successes),
 			[]string{"target", "outcome"}, []string{name, "success"})
-		counter(ch, "fc_router_circuit_breaker_calls_total",
+		counter(ch, "fc_circuit_breaker_calls_total",
 			"Cumulative breaker outcomes.",
 			float64(st.Failures),
 			[]string{"target", "outcome"}, []string{name, "failure"})
@@ -178,7 +165,7 @@ func (c *routerCollector) collectInFlight(ch chan<- prometheus.Metric) {
 		return
 	}
 	count := len(c.state.InFlight.Snapshot())
-	gauge(ch, "fc_router_in_flight_total",
+	gauge(ch, "fc_in_pipeline_messages",
 		"Total in-flight messages across all pools.",
 		float64(count), nil, nil)
 }
@@ -202,8 +189,8 @@ func boolFloat(b bool) float64 {
 	return 0
 }
 
-// normaliseQueueID trims AWS SQS URL prefixes so the label cardinality
-// stays bounded (we want `my-queue`, not the full `https://sqs.../my-queue`).
+// normaliseQueueID trims AWS SQS URL prefixes so the label cardinality stays
+// bounded (we want `my-queue`, not the full `https://sqs.../my-queue`).
 func normaliseQueueID(id string) string {
 	if i := strings.LastIndex(id, "/"); i >= 0 && i < len(id)-1 {
 		return id[i+1:]

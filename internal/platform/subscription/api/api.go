@@ -178,6 +178,20 @@ func (s *State) create(ctx context.Context, in *createInput) (*createOutput, err
 	return &createOutput{Body: apicommon.CreatedResponse{ID: committed.Event().SubscriptionID}}, nil
 }
 
+// requireScopeByID loads the subscription and enforces per-resource scope
+// (A2) on top of the coarse permission the caller already checked: a non-anchor
+// principal must not mutate another tenant's subscription by guessing its id.
+func (s *State) requireScopeByID(ctx context.Context, ac *auth.AuthContext, id string) error {
+	sub, err := s.Repo.FindByID(ctx, id)
+	if err != nil {
+		return usecase.Internal("REPO", "find_by_id failed", err)
+	}
+	if sub == nil {
+		return httperror.NotFound("Subscription", id)
+	}
+	return auth.CheckScopeAccess(ac, sub.ClientID)
+}
+
 type updateInput struct {
 	ID   string `path:"id"`
 	Body UpdateSubscriptionRequest
@@ -188,6 +202,9 @@ type emptyOutput struct{}
 func (s *State) update(ctx context.Context, in *updateInput) (*emptyOutput, error) {
 	ac := auth.FromContext(ctx)
 	if err := auth.CanWriteSubscriptions(ac); err != nil {
+		return nil, err
+	}
+	if err := s.requireScopeByID(ctx, ac, in.ID); err != nil {
 		return nil, err
 	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
@@ -206,6 +223,9 @@ func (s *State) delete(ctx context.Context, in *deleteInput) (*emptyOutput, erro
 	if err := auth.CanDeleteSubscriptions(ac); err != nil {
 		return nil, err
 	}
+	if err := s.requireScopeByID(ctx, ac, in.ID); err != nil {
+		return nil, err
+	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
 	if _, err := operations.DeleteSubscription(ctx, s.Repo, s.UoW, operations.DeleteCommand{ID: in.ID}, ec); err != nil {
 		return nil, err
@@ -222,6 +242,9 @@ func (s *State) pause(ctx context.Context, in *pauseInput) (*emptyOutput, error)
 	if err := auth.CanWriteSubscriptions(ac); err != nil {
 		return nil, err
 	}
+	if err := s.requireScopeByID(ctx, ac, in.ID); err != nil {
+		return nil, err
+	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
 	if _, err := operations.PauseSubscription(ctx, s.Repo, s.UoW, operations.PauseCommand{ID: in.ID}, ec); err != nil {
 		return nil, err
@@ -236,6 +259,9 @@ type resumeInput struct {
 func (s *State) resume(ctx context.Context, in *resumeInput) (*emptyOutput, error) {
 	ac := auth.FromContext(ctx)
 	if err := auth.CanWriteSubscriptions(ac); err != nil {
+		return nil, err
+	}
+	if err := s.requireScopeByID(ctx, ac, in.ID); err != nil {
 		return nil, err
 	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)

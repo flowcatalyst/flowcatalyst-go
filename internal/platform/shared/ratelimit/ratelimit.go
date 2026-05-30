@@ -1,7 +1,9 @@
-// Package ratelimit is a 1:1 port of fc-platform/shared/rate_limit_store/.
-// It counts requests across the whole cluster (unlike a per-instance
-// in-memory limiter) so a coordinated attacker spreading load across
-// replicas is still capped.
+// Package ratelimit is a 1:1 port of fc-platform/shared/rate_limit_store/
+// (the distributed Store) and rate_limit_middleware.rs (the in-memory
+// Governor). The cluster-wide Store caps a coordinated attacker spreading
+// load across replicas; the per-instance Governor sheds a local flood in
+// front of it, before the network round-trip (defence in depth). They
+// compose — see Governor in governor.go.
 //
 // Two backends implement one Store contract, selected at startup by
 // Build: Redis (fixed-window INCR+EXPIRE) when FC_REDIS_URL is reachable,

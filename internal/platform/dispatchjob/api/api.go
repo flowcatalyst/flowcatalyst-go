@@ -353,6 +353,9 @@ func (s *State) getByID(ctx context.Context, in *getInput) (*getOutput, error) {
 	if j == nil {
 		return nil, httperror.NotFound("DispatchJob", in.ID)
 	}
+	if err := auth.CheckScopeAccess(ac, j.ClientID); err != nil { // A2: per-resource client scope
+		return nil, err
+	}
 	return &getOutput{Body: fromEntity(j)}, nil
 }
 
@@ -368,6 +371,9 @@ func (s *State) getRaw(ctx context.Context, in *getInput) (*getOutput, error) {
 	if j == nil {
 		return nil, httperror.NotFound("DispatchJob", in.ID)
 	}
+	if err := auth.CheckScopeAccess(ac, j.ClientID); err != nil { // A2: per-resource client scope
+		return nil, err
+	}
 	return &getOutput{Body: fromEntity(j)}, nil
 }
 
@@ -380,6 +386,18 @@ type attemptsOutput struct {
 func (s *State) attempts(ctx context.Context, in *getInput) (*attemptsOutput, error) {
 	ac := auth.FromContext(ctx)
 	if err := auth.CanWritePermission(ac, viewPerm); err != nil {
+		return nil, err
+	}
+	// A2: load the job to enforce per-resource client scope before exposing
+	// its attempts (the attempts query itself isn't client-scoped).
+	j, err := s.Repo.FindByID(ctx, in.ID)
+	if err != nil {
+		return nil, usecase.Internal("REPO", "find_by_id failed", err)
+	}
+	if j == nil {
+		return nil, httperror.NotFound("DispatchJob", in.ID)
+	}
+	if err := auth.CheckScopeAccess(ac, j.ClientID); err != nil {
 		return nil, err
 	}
 	rows, err := s.Repo.AttemptsByJob(ctx, in.ID)
@@ -408,6 +426,10 @@ func (s *State) byEvent(ctx context.Context, in *byEventInput) (*listOutput, err
 	}
 	out := make([]DispatchJobRead, 0, len(rows))
 	for i := range rows {
+		// A2: a non-anchor caller only sees jobs for clients it can access.
+		if !auth.CanAccessScope(ac, rows[i].ClientID) {
+			continue
+		}
 		out = append(out, readFromEntity(&rows[i]))
 	}
 	return &listOutput{Body: out}, nil

@@ -5,11 +5,51 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
 	"github.com/flowcatalyst/flowcatalyst-go/internal/common"
 )
+
+// batchResponse / itemResult mirror the platform batch-ingest response
+// {results:[{id,status,error?}]} (status is SCREAMING_SNAKE_CASE per item).
+type batchResponse struct {
+	Results []itemResult `json:"results"`
+}
+
+type itemResult struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+// parseItemStatus maps the per-item wire status to an OutboxStatus. The wire
+// strings are exactly OutboxStatus.String() (SCREAMING_SNAKE_CASE).
+func parseItemStatus(s string) (common.OutboxStatus, bool) {
+	switch s {
+	case "SUCCESS":
+		return common.OutboxSuccess, true
+	case "BAD_REQUEST":
+		return common.OutboxBadRequest, true
+	case "INTERNAL_ERROR":
+		return common.OutboxInternalError, true
+	case "UNAUTHORIZED":
+		return common.OutboxUnauthorized, true
+	case "FORBIDDEN":
+		return common.OutboxForbidden, true
+	case "GATEWAY_ERROR":
+		return common.OutboxGatewayError, true
+	}
+	return 0, false
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
 
 // HTTPDispatcher sends outbox items to the FlowCatalyst platform API.
 // Mirrors fc-outbox/src/http_dispatcher.rs.
@@ -60,7 +100,22 @@ func (d *HTTPDispatcher) Send(ctx context.Context, item Item) DispatchOutcome {
 
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
-		return DispatchOutcome{Status: common.OutboxSuccess}
+		// OB5: a 2xx is NOT blanket success — the platform reports a PER-ITEM
+		// outcome in {results:[{id,status,error}]}. A batch can return 2xx
+		// while individual items are BAD_REQUEST/etc. Honour the per-item
+		// status (single-item batch → results[0]); a parse failure or empty
+		// results falls back to INTERNAL_ERROR (retryable), matching Rust.
+		var br batchResponse
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if err := json.Unmarshal(body, &br); err != nil || len(br.Results) == 0 {
+			return DispatchOutcome{Status: common.OutboxInternalError, Message: "parse results: " + truncate(string(body), 200)}
+		}
+		r := br.Results[0]
+		st, ok := parseItemStatus(r.Status)
+		if !ok {
+			return DispatchOutcome{Status: common.OutboxInternalError, Message: "unknown item status: " + r.Status}
+		}
+		return DispatchOutcome{Status: st, Message: r.Error}
 	case resp.StatusCode == http.StatusUnauthorized:
 		return DispatchOutcome{Status: common.OutboxUnauthorized, Message: "401"}
 	case resp.StatusCode == http.StatusForbidden:

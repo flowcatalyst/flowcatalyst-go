@@ -72,13 +72,18 @@ func (p *EventProjection) step(ctx context.Context, batchSize int) (int, error) 
 		`INSERT INTO msg_events_read
 		     (id, spec_version, type, source, subject, time, data,
 		      correlation_id, causation_id, deduplication_id, message_group,
-		      client_id, application, subdomain, aggregate, projected_at)
+		      client_id, application, subdomain, aggregate, created_at, projected_at)
 		 SELECT e.id, e.spec_version, e.type, e.source, e.subject, e.time, e.data::text,
 		        e.correlation_id, e.causation_id, e.deduplication_id, e.message_group,
 		        e.client_id,
 		        split_part(e.type, ':', 1),
 		        NULLIF(split_part(e.type, ':', 2), ''),
 		        NULLIF(split_part(e.type, ':', 3), ''),
+		        -- Preserve the SOURCE created_at (the (id, created_at) partition
+		        -- key) so read rows land in the same time partition as their
+		        -- source events and age out with them. Was defaulting to the
+		        -- projection time (NOW()). Mirrors the Rust event projection.
+		        e.created_at,
 		        NOW()
 		   FROM msg_events e
 		  WHERE e.id = ANY($1)

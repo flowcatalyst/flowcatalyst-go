@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -103,6 +104,11 @@ func Run(ctx context.Context, pool *pgxpool.Pool, cfg EnvCfg, opts RunOptions) e
 		go func() { defer wg.Done(); StartScheduler(ctx, pool, cfg) }()
 		slog.Info("scheduler started")
 	}
+	if cfg.ScheduledJobEnabled {
+		wg.Add(1)
+		go func() { defer wg.Done(); StartScheduledJobScheduler(ctx, pool, cfg) }()
+		slog.Info("scheduled-job scheduler started")
+	}
 	if cfg.StreamEnabled {
 		wg.Add(1)
 		go func() {
@@ -192,10 +198,7 @@ func MountRouterHTTP(r chi.Router, prefix string, srv *router.Server, streamHeal
 	}
 	r.Route(prefix, func(sub chi.Router) {
 		// BasicAuth on the router prefix. Disabled when no creds set.
-		sub.Use(routerapi.BasicAuthMiddleware(routerapi.BasicAuthConfig{
-			Username: os.Getenv("FC_ROUTER_AUTH_USER"),
-			Password: os.Getenv("FC_ROUTER_AUTH_PASS"),
-		}))
+		sub.Use(routerapi.BasicAuthMiddleware(resolveRouterAuth()))
 		humaCfg := huma.DefaultConfig("FlowCatalyst Router API", routerapi.Version)
 		// Nest the spec under the prefix so external tooling can grab
 		// the OpenAPI doc at <prefix>/openapi.json.
@@ -207,6 +210,23 @@ func MountRouterHTTP(r chi.Router, prefix string, srv *router.Server, streamHeal
 		routerapi.MountDashboard(sub)
 		sub.Mount("/metrics", routerapi.PrometheusHandler(state))
 	})
+}
+
+// resolveRouterAuth reads the router HTTP BasicAuth config, accepting the Rust
+// AUTH_BASIC_USERNAME / AUTH_BASIC_PASSWORD names as aliases for
+// FC_ROUTER_AUTH_USER / FC_ROUTER_AUTH_PASS. AUTH_MODE=NONE (case-insensitive)
+// forces auth off regardless of creds; any other value (incl. BASIC or unset)
+// uses the resolved creds — an empty username disables auth, mirroring the
+// Rust router's AuthMode::None. (The router HTTP surface supports basic/none
+// only; OIDC modes are not honoured here.)
+func resolveRouterAuth() routerapi.BasicAuthConfig {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("AUTH_MODE")), "NONE") {
+		return routerapi.BasicAuthConfig{}
+	}
+	return routerapi.BasicAuthConfig{
+		Username: envFirst("FC_ROUTER_AUTH_USER", "AUTH_BASIC_USERNAME", ""),
+		Password: envFirst("FC_ROUTER_AUTH_PASS", "AUTH_BASIC_PASSWORD", ""),
+	}
 }
 
 // streamHealthBridge adapts the in-process stream.HealthService into
@@ -252,6 +272,17 @@ func newRouterServer(cfg EnvCfg, pool *pgxpool.Pool) (*router.Server, error) {
 		StandbyEnabled:   cfg.StandbyEnabled,
 		StandbyRedisURL:  cfg.StandbyRedisURL,
 		StandbyLockKey:   cfg.StandbyLockKey,
+		// ALB self-registration: register on leader-gain / non-standby start,
+		// deregister on leader-loss / drain. No-op unless FC_ALB_ENABLED + the
+		// target group ARN + instance IP are set.
+		Traffic: router.TrafficConfig{
+			Enabled:                    cfg.ALBEnabled,
+			TargetGroupARN:             cfg.ALBTargetGroupARN,
+			InstanceIP:                 cfg.ALBInstanceIP,
+			Port:                       int32(cfg.ALBPort),
+			Region:                     cfg.ALBRegion,
+			DeregistrationDelaySeconds: int64(cfg.ALBDeregDelaySec),
+		},
 	}
 	srv, err := router.NewServer(rcfg)
 	if err != nil {

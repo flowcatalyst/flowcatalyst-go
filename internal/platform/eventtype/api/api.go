@@ -237,6 +237,20 @@ func (s *State) create(ctx context.Context, in *createInput) (*createOutput, err
 	return &createOutput{Body: apicommon.CreatedResponse{ID: committed.Event().EventTypeID}}, nil
 }
 
+// requireScopeByID loads the event type and enforces per-resource scope (A2)
+// on top of the coarse permission already checked: a non-anchor principal must
+// not mutate another tenant's event type by id.
+func (s *State) requireScopeByID(ctx context.Context, ac *auth.AuthContext, id string) error {
+	et, err := s.Repo.FindByID(ctx, id)
+	if err != nil {
+		return usecase.Internal("REPO", "find_by_id failed", err)
+	}
+	if et == nil {
+		return httperror.NotFound("EventType", id)
+	}
+	return auth.CheckScopeAccess(ac, et.ClientID)
+}
+
 type updateInput struct {
 	ID   string `path:"id"`
 	Body UpdateEventTypeRequest
@@ -247,6 +261,9 @@ type emptyOutput struct{}
 func (s *State) update(ctx context.Context, in *updateInput) (*emptyOutput, error) {
 	ac := auth.FromContext(ctx)
 	if err := auth.CanWriteEventTypes(ac); err != nil {
+		return nil, err
+	}
+	if err := s.requireScopeByID(ctx, ac, in.ID); err != nil {
 		return nil, err
 	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
@@ -265,6 +282,9 @@ func (s *State) delete(ctx context.Context, in *deleteInput) (*emptyOutput, erro
 	if err := auth.CanDeleteEventTypes(ac); err != nil {
 		return nil, err
 	}
+	if err := s.requireScopeByID(ctx, ac, in.ID); err != nil {
+		return nil, err
+	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
 	if _, err := operations.DeleteEventType(ctx, s.Repo, s.UoW, operations.DeleteCommand{ID: in.ID}, ec); err != nil {
 		return nil, err
@@ -280,6 +300,9 @@ type addSchemaInput struct {
 func (s *State) addSchema(ctx context.Context, in *addSchemaInput) (*createOutput, error) {
 	ac := auth.FromContext(ctx)
 	if err := auth.CanWriteEventTypes(ac); err != nil {
+		return nil, err
+	}
+	if err := s.requireScopeByID(ctx, ac, in.ID); err != nil {
 		return nil, err
 	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)

@@ -89,8 +89,10 @@ func DevMediatorConfig() MediatorConfig {
 // slots, each backed by its own *http.Transport so the slots' h2
 // connection pools are independent. Mirrors crates/fc-router/src/http_pool.rs.
 type HTTPMediator struct {
-	pools *HostPoolRegistry
-	cfg   MediatorConfig
+	pools    *HostPoolRegistry
+	cfg      MediatorConfig
+	breakers *BreakerRegistry
+	warnings *WarningService // optional; set via SetWarnings. nil → no-op.
 }
 
 // NewHTTPMediator wires an HTTP mediator with the supplied config.
@@ -113,7 +115,7 @@ type HTTPMediator struct {
 // `ResponseHeaderTimeout` is intentionally NOT set: it would shadow
 // Client.Timeout for the response-header phase only and obscure which
 // timeout is actually enforced. Single source of truth: Client.Timeout.
-func NewHTTPMediator(cfg MediatorConfig) *HTTPMediator {
+func NewHTTPMediator(cfg MediatorConfig, breakers *BreakerRegistry) *HTTPMediator {
 	sizing := cfg.HostPoolSizing
 	if sizing.MaxSlotsPerHost == 0 {
 		if cfg.HTTPVersion == HTTPVersion1 {
@@ -126,7 +128,7 @@ func NewHTTPMediator(cfg MediatorConfig) *HTTPMediator {
 	builder := newClientBuilder(cfg)
 	pools := NewHostPoolRegistry(sizing, builder)
 	pools.StartSweep()
-	return &HTTPMediator{pools: pools, cfg: cfg}
+	return &HTTPMediator{pools: pools, cfg: cfg, breakers: breakers}
 }
 
 // Close stops the host-pool sweep goroutine. Safe to call multiple
@@ -141,6 +143,22 @@ func (m *HTTPMediator) Close() {
 // HostPools is exposed for tests/metrics. Production code should not
 // poke at the registry directly.
 func (m *HTTPMediator) HostPools() *HostPoolRegistry { return m.pools }
+
+// SetWarnings wires a WarningService so configuration-class responses surface on
+// /warnings and degrade health. Opt-in: when unset, warnConfig only logs. Set
+// once at startup, before serving.
+func (m *HTTPMediator) SetWarnings(ws *WarningService) { m.warnings = ws }
+
+// warnConfig logs a configuration-class warning and, when a WarningService is
+// wired, records it so it shows on /warnings and (for Critical, e.g. 501)
+// degrades health. Mirrors the Rust mediator's config-error warnings.
+func (m *HTTPMediator) warnConfig(severity WarningSeverity, message string, msg *common.Message) {
+	slog.Warn("mediation config error", "message_id", msg.ID, "target", msg.MediationTarget,
+		"detail", message, "severity", severity)
+	if m.warnings != nil {
+		m.warnings.Add(WarningCategoryConfiguration, severity, message, "HttpMediator")
+	}
+}
 
 // newClientBuilder returns a ClientBuilder that mints a fresh
 // *http.Client with its own *http.Transport per call. Each Transport
@@ -197,8 +215,34 @@ func signWebhook(payload []byte, signingSecret string) (sigHex, ts string) {
 	return hex.EncodeToString(mac.Sum(nil)), ts
 }
 
-// Mediate delivers the message with retry. Returns the outcome.
+// Mediate consults the per-endpoint circuit breaker, delivers with retry, and
+// records the breaker outcome in ONE place. Centralising the success/failure
+// recording here (rather than per-outcome in the pool) removes the class of bug
+// where a single switch arm forgets to record. An open breaker short-circuits:
+// no HTTP is attempted and a circuit-open outcome is returned for the pool to DEFER.
 func (m *HTTPMediator) Mediate(ctx context.Context, msg *common.Message) common.MediationOutcome {
+	cb := m.breakers.Get(msg.MediationTarget)
+	if err := cb.Allow(); err != nil {
+		return common.CircuitOpen(int(cb.ResetTimeout().Seconds()))
+	}
+	outcome := m.deliverWithRetry(ctx, msg)
+	switch outcome.Result {
+	case common.MediationSuccess, common.MediationErrorConfig:
+		// 4xx is reachable → record a SUCCESS: a config error must not trip the
+		// breaker, and must let an open/half-open breaker recover.
+		cb.RecordSuccess()
+	case common.MediationErrorProcess, common.MediationErrorConnection:
+		cb.RecordFailure()
+	case common.MediationRateLimited, common.MediationCircuitOpen:
+		// 429: destination healthy, just throttling — neither success nor failure.
+		// CircuitOpen is returned before delivery, so it never reaches here; listed
+		// for switch exhaustiveness.
+	}
+	return outcome
+}
+
+// deliverWithRetry delivers the message with retry. Returns the outcome.
+func (m *HTTPMediator) deliverWithRetry(ctx context.Context, msg *common.Message) common.MediationOutcome {
 	var last common.MediationOutcome
 	// Mirrors crates/fc-router/src/mediator/retry.rs exactly: MaxRetries is
 	// the max TOTAL attempts (default 3), and a delay is taken only between
@@ -212,6 +256,9 @@ func (m *HTTPMediator) Mediate(ctx context.Context, msg *common.Message) common.
 		switch last.Result {
 		case common.MediationSuccess, common.MediationErrorConfig, common.MediationRateLimited:
 			return last
+		default:
+			// ErrorProcess / ErrorConnection are retryable; fall through to backoff.
+			// (CircuitOpen is returned before the retry loop, so never reaches here.)
 		}
 		attempts++
 		if attempts >= m.cfg.MaxRetries {
@@ -295,15 +342,15 @@ func (m *HTTPMediator) mediateOnce(ctx context.Context, msg *common.Message) com
 		return common.Success()
 
 	case status == 400:
-		slog.Warn("HTTP 400 from target", "message_id", msg.ID, "target", msg.MediationTarget)
+		m.warnConfig(WarningError, "HTTP 400: Bad request", msg)
 		return common.ErrorConfig(status, "HTTP 400: Bad request")
 
 	case status == 401 || status == 403:
-		slog.Warn("auth error from target", "message_id", msg.ID, "status", status)
+		m.warnConfig(WarningError, fmt.Sprintf("HTTP %d: Auth error", status), msg)
 		return common.ErrorConfig(status, fmt.Sprintf("HTTP %d: Auth error", status))
 
 	case status == 404:
-		slog.Warn("target not found", "message_id", msg.ID, "target", msg.MediationTarget)
+		m.warnConfig(WarningError, "HTTP 404: Not found", msg)
 		return common.ErrorConfig(status, "HTTP 404: Not found")
 
 	case status == 429:
@@ -317,7 +364,7 @@ func (m *HTTPMediator) mediateOnce(ctx context.Context, msg *common.Message) com
 		return common.RateLimited(retryAfter)
 
 	case status == 501:
-		slog.Warn("target not implemented", "message_id", msg.ID)
+		m.warnConfig(WarningCritical, "HTTP 501: Not implemented", msg)
 		return common.ErrorConfig(status, "HTTP 501: Not implemented")
 
 	case status >= 400 && status < 500:

@@ -10,62 +10,86 @@ import (
 	"github.com/flowcatalyst/flowcatalyst-go/internal/router"
 )
 
-func TestCircuitBreakerTripsAfterThreshold(t *testing.T) {
-	cb := router.NewCircuitBreaker(router.BreakerConfig{
-		FailureThreshold: 3,
-		WindowSize:       10,
-		OpenTimeout:      50 * time.Millisecond,
-	})
+// rateCfg is a small, fast config for the failure-rate tests.
+func rateCfg() router.BreakerConfig {
+	return router.BreakerConfig{
+		FailureRateThreshold: 0.5,
+		MinCalls:             4,
+		SuccessThreshold:     2,
+		ResetTimeout:         20 * time.Millisecond,
+		BufferSize:           10,
+	}
+}
+
+func TestCircuitBreakerTripsOnFailureRateAfterMinCalls(t *testing.T) {
+	cb := router.NewCircuitBreaker(rateCfg())
 
 	require.NoError(t, cb.Allow())
+	// 3 failures: below MinCalls (4) → must stay closed even at 100% rate.
 	for range 3 {
 		cb.RecordFailure()
 	}
+	assert.Equal(t, router.CircuitClosed, cb.State(), "below MinCalls the breaker must not trip")
+
+	// 4th failure: count==MinCalls, rate 1.0 ≥ 0.5 → open.
+	cb.RecordFailure()
 	assert.Equal(t, router.CircuitOpen, cb.State())
 	assert.ErrorIs(t, cb.Allow(), router.ErrCircuitOpen)
 }
 
-func TestCircuitBreakerHalfOpenAfterTimeout(t *testing.T) {
-	cb := router.NewCircuitBreaker(router.BreakerConfig{
-		FailureThreshold: 1,
-		WindowSize:       5,
-		OpenTimeout:      20 * time.Millisecond,
-	})
-
-	cb.RecordFailure()
-	require.Equal(t, router.CircuitOpen, cb.State())
-
-	time.Sleep(30 * time.Millisecond)
-	assert.Equal(t, router.CircuitHalfOpen, cb.State())
-	assert.NoError(t, cb.Allow())
-}
-
-func TestCircuitBreakerSuccessClosesAfterHalfOpen(t *testing.T) {
-	cb := router.NewCircuitBreaker(router.BreakerConfig{
-		FailureThreshold: 1,
-		WindowSize:       5,
-		OpenTimeout:      10 * time.Millisecond,
-	})
-	cb.RecordFailure()
-	time.Sleep(15 * time.Millisecond)
-	require.Equal(t, router.CircuitHalfOpen, cb.State())
-
-	cb.RecordSuccess()
+func TestCircuitBreakerStaysClosedBelowRate(t *testing.T) {
+	cb := router.NewCircuitBreaker(rateCfg())
+	// 6 successes + 4 failures = 10 calls, rate 0.4 < 0.5 → closed.
+	for range 6 {
+		cb.RecordSuccess()
+	}
+	for range 4 {
+		cb.RecordFailure()
+	}
 	assert.Equal(t, router.CircuitClosed, cb.State())
 }
 
+func TestCircuitBreakerHalfOpenAfterResetTimeout(t *testing.T) {
+	cb := router.NewCircuitBreaker(rateCfg())
+	for range 4 {
+		cb.RecordFailure()
+	}
+	require.Equal(t, router.CircuitOpen, cb.State())
+
+	// State() does not auto-transition; Allow() does, once ResetTimeout
+	// elapses since the last failure.
+	time.Sleep(30 * time.Millisecond)
+	assert.Equal(t, router.CircuitOpen, cb.State(), "State alone must not transition")
+	assert.NoError(t, cb.Allow(), "Allow after reset timeout transitions to half-open")
+	assert.Equal(t, router.CircuitHalfOpen, cb.State())
+}
+
+func TestCircuitBreakerClosesAfterSuccessThreshold(t *testing.T) {
+	cb := router.NewCircuitBreaker(rateCfg())
+	for range 4 {
+		cb.RecordFailure()
+	}
+	time.Sleep(30 * time.Millisecond)
+	require.NoError(t, cb.Allow()) // → half-open
+
+	// SuccessThreshold is 2: one success is not enough.
+	cb.RecordSuccess()
+	assert.Equal(t, router.CircuitHalfOpen, cb.State(), "one success below threshold keeps it half-open")
+	cb.RecordSuccess()
+	assert.Equal(t, router.CircuitClosed, cb.State(), "reaching SuccessThreshold closes it")
+}
+
 func TestCircuitBreakerHalfOpenFailureReopens(t *testing.T) {
-	cb := router.NewCircuitBreaker(router.BreakerConfig{
-		FailureThreshold: 1,
-		WindowSize:       5,
-		OpenTimeout:      10 * time.Millisecond,
-	})
-	cb.RecordFailure()
-	time.Sleep(15 * time.Millisecond)
+	cb := router.NewCircuitBreaker(rateCfg())
+	for range 4 {
+		cb.RecordFailure()
+	}
+	time.Sleep(30 * time.Millisecond)
+	require.NoError(t, cb.Allow()) // → half-open
 	require.Equal(t, router.CircuitHalfOpen, cb.State())
 
 	cb.RecordFailure()
-	assert.Equal(t, router.CircuitOpen, cb.State())
+	assert.Equal(t, router.CircuitOpen, cb.State(), "any failure in half-open re-opens")
 }
 
 func TestBreakerRegistryDeduplicates(t *testing.T) {

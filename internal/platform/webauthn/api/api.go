@@ -2,12 +2,12 @@
 //
 // Six endpoints mirror fc-platform/src/webauthn/api.rs:
 //
-//   POST /auth/webauthn/register/begin          — issue registration challenge
-//   POST /auth/webauthn/register/complete       — verify attestation, persist
-//   POST /auth/webauthn/authenticate/begin      — issue authentication challenge
-//   POST /auth/webauthn/authenticate/complete   — verify assertion, set session
-//   GET  /auth/webauthn/credentials             — list user's passkeys
-//   DELETE /auth/webauthn/credentials/{id}      — revoke a passkey
+//	POST /auth/webauthn/register/begin          — issue registration challenge
+//	POST /auth/webauthn/register/complete       — verify attestation, persist
+//	POST /auth/webauthn/authenticate/begin      — issue authentication challenge
+//	POST /auth/webauthn/authenticate/complete   — verify assertion, set session
+//	GET  /auth/webauthn/credentials             — list user's passkeys
+//	DELETE /auth/webauthn/credentials/{id}      — revoke a passkey
 package api
 
 import (
@@ -339,6 +339,24 @@ func (s *State) deleteCredential(ctx context.Context, in *deleteCredInput) (*emp
 	ac := auth.FromContext(ctx)
 	if ac == nil || ac.PrincipalID == "" {
 		return nil, usecase.Authorization("UNAUTHENTICATED", "authentication required")
+	}
+	// Ownership check: a principal may only revoke their OWN passkeys.
+	// Confirm the credential is in the caller's set before revoking, so a
+	// caller can't delete another user's credential by guessing its id.
+	// (NotFound rather than Forbidden — don't reveal other users' credentials.)
+	owned, err := s.Service.Credentials().FindByPrincipal(ctx, ac.PrincipalID)
+	if err != nil {
+		return nil, usecase.Internal("REPO", "find credentials failed", err)
+	}
+	found := false
+	for i := range owned {
+		if owned[i].ID == in.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, httperror.NotFound("Credential", in.ID)
 	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
 	if _, err := operations.Revoke(ctx, s.Creds, s.UoW,

@@ -175,6 +175,21 @@ func (r *Repository) FindActive(ctx context.Context) ([]ScheduledJob, error) {
 	return out, nil
 }
 
+// MarkFired advances last_fired_at to slot, monotonically — it never moves
+// the timestamp backwards (GREATEST), so a slow/duplicate poll can't cause a
+// re-fire of an already-fired window. Mirrors the Rust mark_fired
+// (GREATEST(last_fired_at, $2)); last_fired_at is bookkeeping, so version is
+// intentionally not bumped.
+func (r *Repository) MarkFired(ctx context.Context, id string, slot time.Time) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE msg_scheduled_jobs SET last_fired_at = GREATEST(last_fired_at, $2) WHERE id = $1`,
+		id, slot)
+	if err != nil {
+		return fmt.Errorf("scheduled_job mark_fired: %w", err)
+	}
+	return nil
+}
+
 // Persist implements usecasepgx.Persist[ScheduledJob].
 func (r *Repository) Persist(ctx context.Context, j *ScheduledJob, tx *usecasepgx.DbTx) error {
 	var payloadBytes []byte

@@ -10,15 +10,18 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/oauthapi"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/emaildomainmapping"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/principal"
 	principalops "github.com/flowcatalyst/flowcatalyst-go/internal/platform/principal/operations"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/role"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/shared/httperror"
+	platformmw "github.com/flowcatalyst/flowcatalyst-go/internal/platform/shared/middleware"
 	"github.com/flowcatalyst/flowcatalyst-go/pkg/fcsdk/usecase"
 	"github.com/flowcatalyst/flowcatalyst-go/pkg/fcsdk/usecasepgx"
 )
@@ -40,13 +43,14 @@ import (
 // session-cookie write (and any consent UI) is owned by the
 // SessionWriter callback the platform server installs.
 type LoginEndpoint struct {
-	bridge      *Bridge
-	states      *LoginStateRepo
-	principals  *principal.Repository
-	mappings    *emaildomainmapping.Repository
-	roles       *role.Repository
-	idpMappings *auth.IdpRoleMappingRepo
-	uow         *usecasepgx.UnitOfWork
+	bridge       *Bridge
+	states       *LoginStateRepo
+	principals   *principal.Repository
+	mappings     *emaildomainmapping.Repository
+	roles        *role.Repository
+	idpMappings  *auth.IdpRoleMappingRepo
+	uow          *usecasepgx.UnitOfWork
+	oauthClients *auth.OAuthClientRepo
 
 	// SessionWriter is called after the callback exchange completes
 	// successfully. It receives the resolved principal ID + the
@@ -76,15 +80,17 @@ func NewLoginEndpoint(
 	roles *role.Repository,
 	idpMappings *auth.IdpRoleMappingRepo,
 	uow *usecasepgx.UnitOfWork,
+	oauthClients *auth.OAuthClientRepo,
 ) *LoginEndpoint {
 	return &LoginEndpoint{
-		bridge:      b,
-		states:      states,
-		principals:  principals,
-		mappings:    mappings,
-		roles:       roles,
-		idpMappings: idpMappings,
-		uow:         uow,
+		bridge:       b,
+		states:       states,
+		principals:   principals,
+		mappings:     mappings,
+		roles:        roles,
+		idpMappings:  idpMappings,
+		uow:          uow,
+		oauthClients: oauthClients,
 		SessionWriter: func(w http.ResponseWriter, _ *http.Request, principalID string, returnURL string) {
 			if returnURL != "" {
 				http.Redirect(w, nil, returnURL, http.StatusFound)
@@ -103,6 +109,115 @@ func NewLoginEndpoint(
 func (e *LoginEndpoint) RegisterRoutes(r chi.Router) {
 	r.Get("/auth/oidc/login", e.handleLogin)
 	r.Get("/auth/oidc/callback", e.handleCallback)
+	r.Get("/auth/oidc/session/end", e.handleSessionEnd)
+}
+
+// handleSessionEnd implements OIDC RP-Initiated Logout 1.0 — a 1:1 port of
+// Rust oidc_login_api.rs::session_end. It always clears the fc_session
+// cookie, and when a post_logout_redirect_uri is supplied it verifies the
+// URI is registered for the requesting client before redirecting. The
+// client is identified via the unverified `aud` claim of id_token_hint;
+// the registered whitelist (not the token signature) is the security
+// boundary, so a URI we cannot tie to a client is refused rather than
+// redirected to (CWE-601 open-redirect defence).
+func (e *LoginEndpoint) handleSessionEnd(w http.ResponseWriter, r *http.Request) {
+	// Always clear the session cookie.
+	http.SetCookie(w, &http.Cookie{
+		Name:     platformmw.SessionCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+	})
+
+	q := r.URL.Query()
+	redirectURI := q.Get("post_logout_redirect_uri")
+	idTokenHint := q.Get("id_token_hint")
+	state := q.Get("state")
+
+	// No redirect requested — session ended.
+	if redirectURI == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"message": "Session ended"})
+		return
+	}
+
+	reject := func(reason string) {
+		slog.Warn("rejected post_logout_redirect_uri", "redirect_uri", redirectURI, "reason", reason)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "invalid_request",
+			"error_description": "Invalid post_logout_redirect_uri: " + reason,
+		})
+	}
+
+	if idTokenHint == "" {
+		reject("id_token_hint is required to verify post_logout_redirect_uri")
+		return
+	}
+	clientID := extractAudFromIDTokenHint(idTokenHint)
+	if clientID == "" {
+		reject("id_token_hint is malformed")
+		return
+	}
+	client, err := e.oauthClients.FindByClientID(r.Context(), clientID)
+	if err != nil {
+		reject("internal error verifying client")
+		return
+	}
+	if client == nil {
+		reject("id_token_hint audience does not match any registered client")
+		return
+	}
+	if !oauthapi.MatchesRedirectURI(redirectURI, client.PostLogoutRedirectURIs) {
+		reject("not in the client's registered post_logout_redirect_uris")
+		return
+	}
+
+	target := redirectURI
+	if state != "" {
+		sep := "?"
+		if strings.Contains(target, "?") {
+			sep = "&"
+		}
+		target += sep + "state=" + url.QueryEscape(state)
+	}
+	http.Redirect(w, r, target, http.StatusSeeOther)
+}
+
+// extractAudFromIDTokenHint pulls the `aud` (client_id) claim from an
+// id_token_hint WITHOUT verifying its signature — the registered
+// post_logout_redirect_uris whitelist is the security boundary, not the
+// hint. Returns "" on any structural malformation. 1:1 with Rust
+// extract_aud_from_id_token_hint. `aud` may be a string or an array of
+// strings (OIDC Core §2); for an array the first entry is used.
+func extractAudFromIDTokenHint(token string) string {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	var claims struct {
+		Aud json.RawMessage `json:"aud"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(claims.Aud, &s); err == nil {
+		return s
+	}
+	var arr []string
+	if err := json.Unmarshal(claims.Aud, &arr); err == nil && len(arr) > 0 {
+		return arr[0]
+	}
+	return ""
 }
 
 // handleLogin starts an OIDC login. Takes ?domain=X (required) and

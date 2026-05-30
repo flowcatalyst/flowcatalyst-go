@@ -32,24 +32,27 @@ type Repository struct {
 // transaction and UPDATE/RETURNING to claim. Single-writer model.
 func New() *Repository { return &Repository{} }
 
-// CreateOutboxTableSQL is the SQLite schema. Column names match the
-// Postgres outbox; types are SQLite equivalents (INTEGER for status,
-// TEXT for everything else, datetime stored as ISO8601 strings).
+// CreateOutboxTableSQL is the SQLite schema. Column names match the SDK
+// customer outbox migration (clients/*/migrations/sqlite); types are SQLite
+// equivalents (INTEGER for status, TEXT for everything else, datetime as
+// ISO8601 strings).
 const CreateOutboxTableSQL = `
 CREATE TABLE IF NOT EXISTS outbox_messages (
     id            TEXT PRIMARY KEY,
-    item_type     TEXT NOT NULL,
+    type          TEXT NOT NULL,
     message_group TEXT,
     payload       TEXT NOT NULL,
     status        INTEGER NOT NULL DEFAULT 0,
-    status_message TEXT,
-    attempt_count INTEGER NOT NULL DEFAULT 0,
-    next_retry_at DATETIME,
+    retry_count   INTEGER NOT NULL DEFAULT 0,
     created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    error_message TEXT,
+    client_id     TEXT,
+    payload_size  INTEGER,
+    headers       TEXT
 );
-CREATE INDEX IF NOT EXISTS outbox_messages_pending_idx
-    ON outbox_messages (status, next_retry_at);
+CREATE INDEX IF NOT EXISTS idx_outbox_messages_pending
+    ON outbox_messages (status, message_group, created_at);
 `
 
 // InitSchema creates the outbox table.
@@ -73,9 +76,20 @@ func (*Repository) MarkSuccess(_ context.Context, _ []string) error {
 	return errors.New("sqlite outbox: MarkSuccess wired in phase 4 follow-up")
 }
 
-// MarkFailed flips items with the supplied failed status + retry time.
-func (*Repository) MarkFailed(_ context.Context, _ []string, _ common.OutboxStatus, _ string, _ time.Time) error {
+// MarkFailed records the failure (retry_count bump + error_message; requeue
+// returns the row to PENDING).
+func (*Repository) MarkFailed(_ context.Context, _ []string, _ common.OutboxStatus, _ string, _ bool) error {
 	return errors.New("sqlite outbox: MarkFailed wired in phase 4 follow-up")
+}
+
+// Release returns claimed rows to PENDING without penalty (block-on-error).
+func (*Repository) Release(_ context.Context, _ []string) error {
+	return errors.New("sqlite outbox: Release wired in phase 4 follow-up")
+}
+
+// RecoverStuck resets stuck IN_PROGRESS rows to PENDING.
+func (*Repository) RecoverStuck(_ context.Context, _ time.Duration) (int, error) {
+	return 0, errors.New("sqlite outbox: RecoverStuck wired in phase 4 follow-up")
 }
 
 // Healthy pings the DB.
