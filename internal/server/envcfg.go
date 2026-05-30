@@ -72,6 +72,9 @@ type EnvCfg struct {
 	// re-run in order behind it.
 	OutboxMaxConcurrentGroups int
 	OutboxBlockOnError        bool
+	// OutboxAdminPort serves the operational state-machine admin API
+	// (pause/resume/unblock/skip message groups) on 127.0.0.1:<port>. 0 = off.
+	OutboxAdminPort int
 	// Backend selection: "postgres" (default, shared pool) or "mongo".
 	OutboxBackend  string
 	OutboxMongoURI string
@@ -160,6 +163,7 @@ func LoadEnv() EnvCfg {
 		OutboxPollIntervalMS:      envInt("FC_OUTBOX_POLL_INTERVAL_MS", 0),
 		OutboxMaxConcurrentGroups: envIntAlias("FC_OUTBOX_MAX_CONCURRENT_GROUPS", "FC_MAX_CONCURRENT_GROUPS", 0),
 		OutboxBlockOnError:        envBool("FC_OUTBOX_BLOCK_ON_ERROR", true),
+		OutboxAdminPort:           envInt("FC_OUTBOX_ADMIN_PORT", 0),
 		OutboxBackend:             envOr("FC_OUTBOX_BACKEND", "postgres"),
 		OutboxMongoURI:            envFirst("FC_OUTBOX_MONGO_URI", "FC_OUTBOX_DB_URL", "", ""),
 		OutboxMongoDB:             envOr("FC_OUTBOX_MONGO_DB", "flowcatalyst"),

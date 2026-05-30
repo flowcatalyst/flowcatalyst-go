@@ -61,6 +61,7 @@ type Processor struct {
 	repo         Repository
 	dispatcher   *HTTPDispatcher
 	distributor  *GroupDistributor
+	groups       *GroupStateManager
 	inFlight     atomic.Int64
 	totalSucceed atomic.Uint64
 	totalFailed  atomic.Uint64
@@ -80,6 +81,7 @@ func NewProcessor(cfg Config, repo Repository) *Processor {
 		repo:        repo,
 		dispatcher:  d,
 		distributor: NewGroupDistributor(cfg.MaxConcurrentGroups, cfg.BlockOnError),
+		groups:      NewGroupStateManager(),
 	}
 }
 
@@ -142,6 +144,13 @@ func (p *Processor) tick(ctx context.Context) {
 	for _, item := range items {
 		item := item
 		if item.MessageGroup != nil && *item.MessageGroup != "" {
+			// State machine: skip a Paused/Blocked group — release its claimed
+			// items back to PENDING (re-claimed once the group is resumed/
+			// unblocked) instead of dispatching past a block.
+			if !p.groups.IsActive(*item.MessageGroup) {
+				p.release(ctx, item)
+				continue
+			}
 			p.inFlight.Add(1)
 			p.distributor.Submit(item,
 				func() bool {
@@ -231,8 +240,56 @@ func (p *Processor) dispatch(ctx context.Context, item Item) bool {
 		slog.Warn("outbox mark failed", "id", item.ID, "err", err)
 	}
 	p.totalFailed.Add(1)
+	// State machine: a PERMANENT failure (non-retryable or retry-exhausted) of a
+	// grouped item blocks its group until an operator unblocks (retry) or skips
+	// (abandon) the poison item — so the group never silently advances past it.
+	if !requeue && p.cfg.BlockOnError && item.MessageGroup != nil && *item.MessageGroup != "" {
+		p.groups.Block(*item.MessageGroup, item.ID, out.Message)
+		slog.Warn("outbox message group blocked", "group", *item.MessageGroup, "id", item.ID, "error", out.Message)
+	}
 	return false
 }
+
+// ── Operational state machine controls (Rust message_group_processor parity) ──
+
+// PauseGroup stops dispatching a message group; its items are released to
+// PENDING each cycle until ResumeGroup. No-op when the group is Blocked.
+func (p *Processor) PauseGroup(group string) { p.groups.Pause(group) }
+
+// ResumeGroup resumes a Paused group.
+func (p *Processor) ResumeGroup(group string) { p.groups.Resume(group) }
+
+// UnblockGroup clears a Blocked group and RE-QUEUES the poison item (a fresh
+// retry), so the whole group runs again in order. Returns false if not Blocked.
+func (p *Processor) UnblockGroup(ctx context.Context, group string) bool {
+	itemID, ok := p.groups.ClearBlock(group)
+	if !ok {
+		return false
+	}
+	if itemID != "" {
+		if err := p.repo.Requeue(ctx, []string{itemID}); err != nil {
+			slog.Warn("outbox unblock requeue failed", "group", group, "id", itemID, "err", err)
+		}
+	}
+	slog.Info("outbox group unblocked (poison re-queued)", "group", group, "id", itemID)
+	return true
+}
+
+// SkipGroup clears a Blocked group WITHOUT re-queuing the poison item — it stays
+// terminally failed and the group advances past it. Returns false if not Blocked.
+func (p *Processor) SkipGroup(group string) bool {
+	itemID, ok := p.groups.ClearBlock(group)
+	if ok {
+		slog.Info("outbox group skipped blocking item", "group", group, "id", itemID)
+	}
+	return ok
+}
+
+// GroupStates returns the non-default (Paused/Blocked) message-group states.
+func (p *Processor) GroupStates() []GroupInfo { return p.groups.Snapshot() }
+
+// BlockedGroups returns only the Blocked message groups.
+func (p *Processor) BlockedGroups() []GroupInfo { return p.groups.Blocked() }
 
 // InFlight returns the count of items currently in dispatch.
 func (p *Processor) InFlight() int64 { return p.inFlight.Load() }

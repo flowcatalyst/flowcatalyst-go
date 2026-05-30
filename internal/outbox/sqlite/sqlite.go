@@ -87,6 +87,11 @@ func (*Repository) Release(_ context.Context, _ []string) error {
 	return errors.New("sqlite outbox: Release wired in phase 4 follow-up")
 }
 
+// Requeue resets rows to PENDING from any status (state-machine Unblock-retry).
+func (*Repository) Requeue(_ context.Context, _ []string) error {
+	return errors.New("sqlite outbox: Requeue wired in phase 4 follow-up")
+}
+
 // RecoverStuck resets stuck IN_PROGRESS rows to PENDING.
 func (*Repository) RecoverStuck(_ context.Context, _ time.Duration) (int, error) {
 	return 0, errors.New("sqlite outbox: RecoverStuck wired in phase 4 follow-up")
