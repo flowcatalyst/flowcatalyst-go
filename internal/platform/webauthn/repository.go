@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/jackc/pgx/v5"
@@ -44,7 +45,13 @@ func (r *Repository) FindByCredentialID(ctx context.Context, credID []byte) (*Cr
 	if err != nil {
 		return nil, fmt.Errorf("webauthn repo: %w", err)
 	}
-	return rowToCredential(row)
+	c, err := rowToCredential(row)
+	if errors.Is(err, ErrLegacyPasskey) {
+		// Treat a legacy passkey as not-found so an assertion cleanly rejects
+		// it (the user re-registers) rather than erroring the auth flow.
+		return nil, nil
+	}
+	return c, err
 }
 
 // FindByPrincipal returns all credentials for a principal.
@@ -57,6 +64,13 @@ func (r *Repository) FindByPrincipal(ctx context.Context, principalID string) ([
 	for _, row := range rows {
 		c, err := rowToCredential(row)
 		if err != nil {
+			// Skip (don't fail the whole list on) a legacy webauthn-rs passkey
+			// so it can't block listing / fresh registration / authentication.
+			// It stays invisible + harmless until the owner re-registers.
+			if errors.Is(err, ErrLegacyPasskey) {
+				slog.Warn("skipping legacy webauthn passkey", "credential", row.ID, "principal", principalID)
+				continue
+			}
 			return nil, err
 		}
 		out = append(out, *c)
@@ -120,11 +134,17 @@ func rowToCredential(row dbq.WebauthnCredential) (*Credential, error) {
 	// webauthn-rs sample to implement + validate safely; until then a user with
 	// a legacy passkey must re-register it.
 	if len(c.Credential.ID) == 0 && isLegacyRustPasskey(row.PasskeyData) {
-		return nil, fmt.Errorf("credential %s is a legacy webauthn-rs passkey (Rust format); "+
-			"convert-on-read is not yet implemented — the user must re-register this passkey", row.ID)
+		return nil, fmt.Errorf("credential %s is a legacy webauthn-rs passkey (re-register): %w", row.ID, ErrLegacyPasskey)
 	}
 	return &c, nil
 }
+
+// ErrLegacyPasskey marks a credential stored in the legacy webauthn-rs format
+// (incompatible with go-webauthn — see isLegacyRustPasskey). Per the owner,
+// legacy passkeys need not be converted; callers skip them in list/auth
+// contexts so they never block fresh passkey registration/use, and the owner
+// re-registers. Full convert-on-read is a tracked, deliberately-deferred item.
+var ErrLegacyPasskey = errors.New("legacy webauthn-rs passkey; re-registration required")
 
 // isLegacyRustPasskey reports whether a passkey_data blob is the webauthn-rs
 // Passkey shape (a top-level "cred" object) rather than the go-webauthn
