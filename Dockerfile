@@ -44,6 +44,7 @@ COPY --from=build /out/fc-server /usr/local/bin/fc-server
 ENV FC_API_PORT=8080
 # 8080 = API (+ embedded SPA), 9090 = Prometheus metrics.
 EXPOSE 8080 9090
+# GET (not --spider/HEAD): the /health route is GET-only, so a HEAD probe 405s.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
-  CMD wget -q --spider http://127.0.0.1:8080/health || exit 1
+  CMD wget -q -O /dev/null http://127.0.0.1:8080/health || exit 1
 ENTRYPOINT ["/usr/local/bin/fc-server"]
