@@ -187,6 +187,20 @@ func (s *State) create(ctx context.Context, in *createInput) (*createOutput, err
 	return &createOutput{Body: apicommon.CreatedResponse{ID: committed.Event().PoolID}}, nil
 }
 
+// requireScopeByID loads the pool and enforces per-resource scope (A2) on top
+// of the coarse permission already checked: a non-anchor principal must not
+// mutate another tenant's dispatch pool by id.
+func (s *State) requireScopeByID(ctx context.Context, ac *auth.AuthContext, id string) error {
+	p, err := s.Repo.FindByID(ctx, id)
+	if err != nil {
+		return usecase.Internal("REPO", "find_by_id failed", err)
+	}
+	if p == nil {
+		return httperror.NotFound("DispatchPool", id)
+	}
+	return auth.CheckScopeAccess(ac, p.ClientID)
+}
+
 type updateInput struct {
 	ID   string `path:"id"`
 	Body UpdateDispatchPoolRequest
@@ -197,6 +211,9 @@ type emptyOutput struct{}
 func (s *State) update(ctx context.Context, in *updateInput) (*emptyOutput, error) {
 	ac := auth.FromContext(ctx)
 	if err := auth.CanWriteDispatchPools(ac); err != nil {
+		return nil, err
+	}
+	if err := s.requireScopeByID(ctx, ac, in.ID); err != nil {
 		return nil, err
 	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
@@ -215,6 +232,9 @@ func (s *State) archive(ctx context.Context, in *archiveInput) (*emptyOutput, er
 	if err := auth.CanWriteDispatchPools(ac); err != nil {
 		return nil, err
 	}
+	if err := s.requireScopeByID(ctx, ac, in.ID); err != nil {
+		return nil, err
+	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
 	if _, err := operations.ArchiveDispatchPool(ctx, s.Repo, s.UoW, operations.ArchiveCommand{ID: in.ID}, ec); err != nil {
 		return nil, err
@@ -227,6 +247,9 @@ func (s *State) suspend(ctx context.Context, in *archiveInput) (*emptyOutput, er
 	if err := auth.CanWriteDispatchPools(ac); err != nil {
 		return nil, err
 	}
+	if err := s.requireScopeByID(ctx, ac, in.ID); err != nil {
+		return nil, err
+	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
 	if _, err := operations.SuspendDispatchPool(ctx, s.Repo, s.UoW, operations.SuspendCommand{ID: in.ID}, ec); err != nil {
 		return nil, err
@@ -237,6 +260,9 @@ func (s *State) suspend(ctx context.Context, in *archiveInput) (*emptyOutput, er
 func (s *State) activate(ctx context.Context, in *archiveInput) (*emptyOutput, error) {
 	ac := auth.FromContext(ctx)
 	if err := auth.CanWriteDispatchPools(ac); err != nil {
+		return nil, err
+	}
+	if err := s.requireScopeByID(ctx, ac, in.ID); err != nil {
 		return nil, err
 	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
@@ -253,6 +279,9 @@ type deleteInput struct {
 func (s *State) delete(ctx context.Context, in *deleteInput) (*emptyOutput, error) {
 	ac := auth.FromContext(ctx)
 	if err := auth.CanDeleteDispatchPools(ac); err != nil {
+		return nil, err
+	}
+	if err := s.requireScopeByID(ctx, ac, in.ID); err != nil {
 		return nil, err
 	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)

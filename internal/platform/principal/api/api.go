@@ -27,15 +27,15 @@ import (
 // State bundles deps. Principal ops need cross-aggregate validation
 // against roles, applications, and clients.
 type State struct {
-	Repo            *principal.Repository
-	GrantRepo       *principal.ClientAccessGrantRepo
-	Roles           *role.Repository
-	Applications    *application.Repository
-	Clients         *client.Repository
-	Mappings        *emaildomainmapping.Repository // for /check-email-domain
-	IdentityProviders *identityprovider.Repository // for /check-email-domain
-	UoW             *usecasepgx.UnitOfWork
-	PasswordEmailer operations.PasswordResetEmailer // optional; gates /send-password-reset
+	Repo              *principal.Repository
+	GrantRepo         *principal.ClientAccessGrantRepo
+	Roles             *role.Repository
+	Applications      *application.Repository
+	Clients           *client.Repository
+	Mappings          *emaildomainmapping.Repository // for /check-email-domain
+	IdentityProviders *identityprovider.Repository   // for /check-email-domain
+	UoW               *usecasepgx.UnitOfWork
+	PasswordEmailer   operations.PasswordResetEmailer // optional; gates /send-password-reset
 }
 
 const tag = "principals"
@@ -298,6 +298,21 @@ func (s *State) create(ctx context.Context, in *createInput) (*createOutput, err
 	return &createOutput{Body: apicommon.CreatedResponse{ID: committed.Event().UserID}}, nil
 }
 
+// requireScopeByID loads the principal and enforces per-resource scope (A2) on
+// top of the coarse permission already checked: a non-anchor principal must not
+// mutate another tenant's principal by id. (Rust additionally restricts
+// scope/client_id *changes* to anchors — a separate nuance not covered here.)
+func (s *State) requireScopeByID(ctx context.Context, ac *auth.AuthContext, id string) error {
+	p, err := s.Repo.FindByID(ctx, id)
+	if err != nil {
+		return usecase.Internal("REPO", "find_by_id failed", err)
+	}
+	if p == nil {
+		return httperror.NotFound("Principal", id)
+	}
+	return auth.CheckScopeAccess(ac, p.ClientID)
+}
+
 type updateInput struct {
 	ID   string `path:"id"`
 	Body UpdatePrincipalRequest
@@ -308,6 +323,9 @@ type emptyOutput struct{}
 func (s *State) update(ctx context.Context, in *updateInput) (*getOutput, error) {
 	ac := auth.FromContext(ctx)
 	if err := auth.CanWritePrincipals(ac); err != nil {
+		return nil, err
+	}
+	if err := s.requireScopeByID(ctx, ac, in.ID); err != nil {
 		return nil, err
 	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)

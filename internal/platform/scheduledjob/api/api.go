@@ -284,6 +284,21 @@ func (s *State) create(ctx context.Context, in *createInput) (*createOutput, err
 	return &createOutput{Body: apicommon.CreatedResponse{ID: committed.Event().ScheduledJobID}}, nil
 }
 
+// requireScopeByID loads the scheduled job and enforces per-resource scope
+// (A2) on top of the coarse permission already checked: a non-anchor principal
+// must not mutate another tenant's scheduled job by id. Mirrors Rust
+// check_scope_access(auth, job.client_id).
+func (s *State) requireScopeByID(ctx context.Context, ac *auth.AuthContext, id string) error {
+	j, err := s.Repo.FindByID(ctx, id)
+	if err != nil {
+		return usecase.Internal("REPO", "find_by_id failed", err)
+	}
+	if j == nil {
+		return httperror.NotFound("ScheduledJob", id)
+	}
+	return auth.CheckScopeAccess(ac, j.ClientID)
+}
+
 type updateInput struct {
 	ID   string `path:"id"`
 	Body UpdateScheduledJobRequest
@@ -294,6 +309,9 @@ type emptyOutput struct{}
 func (s *State) update(ctx context.Context, in *updateInput) (*emptyOutput, error) {
 	ac := auth.FromContext(ctx)
 	if err := auth.CanWriteScheduledJobs(ac); err != nil {
+		return nil, err
+	}
+	if err := s.requireScopeByID(ctx, ac, in.ID); err != nil {
 		return nil, err
 	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
@@ -312,6 +330,9 @@ func (s *State) pause(ctx context.Context, in *idInput) (*emptyOutput, error) {
 	if err := auth.CanWriteScheduledJobs(ac); err != nil {
 		return nil, err
 	}
+	if err := s.requireScopeByID(ctx, ac, in.ID); err != nil {
+		return nil, err
+	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
 	if _, err := operations.PauseScheduledJob(ctx, s.Repo, s.UoW, operations.PauseCommand{ID: in.ID}, ec); err != nil {
 		return nil, err
@@ -324,6 +345,9 @@ func (s *State) resume(ctx context.Context, in *idInput) (*emptyOutput, error) {
 	if err := auth.CanWriteScheduledJobs(ac); err != nil {
 		return nil, err
 	}
+	if err := s.requireScopeByID(ctx, ac, in.ID); err != nil {
+		return nil, err
+	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
 	if _, err := operations.ResumeScheduledJob(ctx, s.Repo, s.UoW, operations.ResumeCommand{ID: in.ID}, ec); err != nil {
 		return nil, err
@@ -334,6 +358,9 @@ func (s *State) resume(ctx context.Context, in *idInput) (*emptyOutput, error) {
 func (s *State) archive(ctx context.Context, in *idInput) (*emptyOutput, error) {
 	ac := auth.FromContext(ctx)
 	if err := auth.CanWriteScheduledJobs(ac); err != nil {
+		return nil, err
+	}
+	if err := s.requireScopeByID(ctx, ac, in.ID); err != nil {
 		return nil, err
 	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
@@ -357,6 +384,9 @@ func (s *State) fireNow(ctx context.Context, in *fireNowInput) (*fireNowOutput, 
 	if err := auth.CanFireScheduledJobs(ac); err != nil {
 		return nil, err
 	}
+	if err := s.requireScopeByID(ctx, ac, in.ID); err != nil {
+		return nil, err
+	}
 	var correlationID *string
 	if in.Body != nil {
 		correlationID = in.Body.CorrelationID
@@ -376,6 +406,9 @@ func (s *State) fireNow(ctx context.Context, in *fireNowInput) (*fireNowOutput, 
 func (s *State) delete(ctx context.Context, in *idInput) (*emptyOutput, error) {
 	ac := auth.FromContext(ctx)
 	if err := auth.CanDeleteScheduledJobs(ac); err != nil {
+		return nil, err
+	}
+	if err := s.requireScopeByID(ctx, ac, in.ID); err != nil {
 		return nil, err
 	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
@@ -535,6 +568,9 @@ func (s *State) writeInstanceLog(ctx context.Context, in *writeLogInput) (*empty
 	if inst == nil {
 		return nil, httperror.NotFound("ScheduledJobInstance", in.InstanceID)
 	}
+	if err := auth.CheckScopeAccess(ac, inst.ClientID); err != nil { // A2: per-instance client scope
+		return nil, err
+	}
 	log := &scheduledjob.ScheduledJobInstanceLog{
 		ID:             tsid.Generate(tsid.ScheduledJobInstanceLog),
 		InstanceID:     in.InstanceID,
@@ -562,6 +598,16 @@ func (s *State) completeInstance(ctx context.Context, in *completeInstanceInput)
 	}
 	if s.Instances == nil {
 		return nil, usecase.Internal("WIRING", "instances repo not configured", nil)
+	}
+	inst, err := s.Instances.FindByID(ctx, in.InstanceID)
+	if err != nil {
+		return nil, usecase.Internal("REPO", "find_instance failed", err)
+	}
+	if inst == nil {
+		return nil, httperror.NotFound("ScheduledJobInstance", in.InstanceID)
+	}
+	if err := auth.CheckScopeAccess(ac, inst.ClientID); err != nil { // A2: per-instance client scope
+		return nil, err
 	}
 	status := scheduledjob.InstanceStatusCompleted
 	if in.Body.Status != "" {

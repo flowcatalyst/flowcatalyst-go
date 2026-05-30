@@ -237,6 +237,38 @@ func IsAdmin(a *AuthContext) error {
 	return usecase.Authorization("ADMIN_REQUIRED", "admin permission required")
 }
 
+// CanAccessScope reports whether the caller may access a resource owned by the
+// given client (nil clientID = platform-level → anchor/super-admin only). The
+// boolean form of CheckScopeAccess, for filtering list results.
+func CanAccessScope(a *AuthContext, clientID *string) bool {
+	if a == nil {
+		return false
+	}
+	if clientID != nil {
+		return a.CanAccessClient(*clientID)
+	}
+	return a.IsAnchor() || a.IsSuperAdmin()
+}
+
+// CheckScopeAccess enforces per-resource scope on a by-id operation, on top of
+// the coarse Can* permission check: a client/tenant-scoped resource (clientID
+// non-nil) requires the caller can access that client; a platform-level
+// resource (clientID nil) requires anchor or super-admin. Without this a
+// non-anchor principal holding e.g. "update subscriptions" could mutate another
+// tenant's resource by guessing its id. 1:1 with Rust check_scope_access.
+func CheckScopeAccess(a *AuthContext, clientID *string) error {
+	if a == nil {
+		return usecase.Authorization("UNAUTHENTICATED", "authentication required")
+	}
+	if CanAccessScope(a, clientID) {
+		return nil
+	}
+	if clientID != nil {
+		return usecase.Authorization("SCOPE_FORBIDDEN", "no access to this resource's client")
+	}
+	return usecase.Authorization("SCOPE_FORBIDDEN", "anchor scope required for this resource")
+}
+
 // requirePermission is the generic helper.
 func requirePermission(a *AuthContext, perm string) error {
 	if a == nil {
