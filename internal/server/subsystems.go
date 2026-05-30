@@ -223,6 +223,10 @@ func StartOutboxProcessor(ctx context.Context, pool *pgxpool.Pool, cfg EnvCfg) {
 	if cfg.OutboxPollIntervalMS > 0 {
 		pcfg.PollInterval = time.Duration(cfg.OutboxPollIntervalMS) * time.Millisecond
 	}
+	if cfg.OutboxMaxConcurrentGroups > 0 {
+		pcfg.MaxConcurrentGroups = cfg.OutboxMaxConcurrentGroups
+	}
+	pcfg.BlockOnError = cfg.OutboxBlockOnError
 
 	p := outbox.NewProcessor(pcfg, repo)
 	p.IsLeader = newLeaderGate(ctx, cfg, "outbox")

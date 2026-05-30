@@ -27,18 +27,27 @@ type Config struct {
 	// (claimed by a since-crashed processor) are reset to PENDING.
 	RecoveryInterval  time.Duration
 	RecoveryThreshold time.Duration
+	// MaxConcurrentGroups caps how many distinct message groups dispatch
+	// concurrently (OB7). <= 0 = unbounded. Mirrors Rust max_concurrent_groups.
+	MaxConcurrentGroups int
+	// BlockOnError stops a message group as soon as one of its items fails,
+	// releasing the rest to re-run in order behind it (OB4 ordering guarantee).
+	// Default true, matching Rust block_on_error. Ungrouped items are unaffected.
+	BlockOnError bool
 }
 
 // DefaultConfig matches the Rust outbox defaults.
 func DefaultConfig() Config {
 	return Config{
-		PollInterval:      1 * time.Second,
-		BatchSize:         100,
-		MaxInFlight:       1000,
-		HTTPTimeout:       30 * time.Second,
-		MaxRetries:        3,
-		RecoveryInterval:  60 * time.Second,
-		RecoveryThreshold: 5 * time.Minute,
+		PollInterval:        1 * time.Second,
+		BatchSize:           100,
+		MaxInFlight:         1000,
+		HTTPTimeout:         30 * time.Second,
+		MaxRetries:          3,
+		RecoveryInterval:    60 * time.Second,
+		RecoveryThreshold:   5 * time.Minute,
+		MaxConcurrentGroups: 10,
+		BlockOnError:        true,
 	}
 }
 
@@ -70,7 +79,7 @@ func NewProcessor(cfg Config, repo Repository) *Processor {
 		cfg:         cfg,
 		repo:        repo,
 		dispatcher:  d,
-		distributor: NewGroupDistributor(),
+		distributor: NewGroupDistributor(cfg.MaxConcurrentGroups, cfg.BlockOnError),
 	}
 }
 
@@ -125,28 +134,44 @@ func (p *Processor) tick(ctx context.Context) {
 		return
 	}
 
-	// Route through the group distributor: items with the same
-	// message_group execute serially (FIFO); items without a group
-	// or in different groups execute concurrently.
+	// Route through the group distributor: items with the same message_group
+	// execute serially (FIFO) and, with BlockOnError, stop the group on a
+	// failure (releasing the rest to re-run in order behind it); items without
+	// a group or in different groups execute concurrently (bounded by OB7).
 	for _, item := range items {
 		item := item
 		p.inFlight.Add(1)
-		p.distributor.Submit(item, func() {
-			defer p.inFlight.Add(-1)
-			p.dispatch(ctx, item)
-		})
+		p.distributor.Submit(item,
+			func() bool {
+				defer p.inFlight.Add(-1)
+				return p.dispatch(ctx, item)
+			},
+			func() {
+				defer p.inFlight.Add(-1)
+				p.release(ctx, item)
+			})
 	}
 }
 
-func (p *Processor) dispatch(ctx context.Context, item Item) {
+// release returns an undispatched, group-blocked item to PENDING (no failure
+// penalty) so the next poll re-claims it in order behind the failed item.
+func (p *Processor) release(ctx context.Context, item Item) {
+	if err := p.repo.Release(ctx, []string{item.ID}); err != nil {
+		slog.Warn("outbox release failed", "id", item.ID, "err", err)
+	}
+}
+
+// dispatch sends one item and records its outcome. Returns true on success,
+// false on any failure (so a message group blocks on it when BlockOnError).
+func (p *Processor) dispatch(ctx context.Context, item Item) bool {
 	out := p.dispatcher.Send(ctx, item)
 	if out.Status == common.OutboxSuccess {
 		if err := p.repo.MarkSuccess(ctx, []string{item.ID}); err != nil {
 			slog.Warn("outbox mark success failed", "id", item.ID, "err", err)
-			return
+			return false
 		}
 		p.totalSucceed.Add(1)
-		return
+		return true
 	}
 	// Failed. Re-queue (back to PENDING) only when the status is retryable AND
 	// the item hasn't hit the max-retries cap (OB6): item.AttemptCount is the
@@ -162,6 +187,7 @@ func (p *Processor) dispatch(ctx context.Context, item Item) {
 		slog.Warn("outbox mark failed", "id", item.ID, "err", err)
 	}
 	p.totalFailed.Add(1)
+	return false
 }
 
 // InFlight returns the count of items currently in dispatch.

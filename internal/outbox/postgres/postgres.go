@@ -160,6 +160,19 @@ func (r *Repository) MarkFailed(ctx context.Context, ids []string, status common
 
 // RecoverStuck resets IN_PROGRESS (9) rows older than olderThan back to
 // PENDING (0) so a crash that left rows claimed-but-unresolved self-heals.
+// Release returns claimed (IN_PROGRESS) rows to PENDING without a failure
+// penalty (no retry bump / error). Used by block-on-error to re-run a group's
+// undispatched items in order behind a failed one.
+func (r *Repository) Release(ctx context.Context, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := r.pool.Exec(ctx,
+		`UPDATE outbox_messages SET status = 0, updated_at = NOW()
+		  WHERE id = ANY($1) AND status = 9`, ids)
+	return err
+}
+
 func (r *Repository) RecoverStuck(ctx context.Context, olderThan time.Duration) (int, error) {
 	cutoff := time.Now().Add(-olderThan)
 	tag, err := r.pool.Exec(ctx,

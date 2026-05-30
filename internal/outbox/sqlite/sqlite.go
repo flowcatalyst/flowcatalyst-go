@@ -82,6 +82,11 @@ func (*Repository) MarkFailed(_ context.Context, _ []string, _ common.OutboxStat
 	return errors.New("sqlite outbox: MarkFailed wired in phase 4 follow-up")
 }
 
+// Release returns claimed rows to PENDING without penalty (block-on-error).
+func (*Repository) Release(_ context.Context, _ []string) error {
+	return errors.New("sqlite outbox: Release wired in phase 4 follow-up")
+}
+
 // RecoverStuck resets stuck IN_PROGRESS rows to PENDING.
 func (*Repository) RecoverStuck(_ context.Context, _ time.Duration) (int, error) {
 	return 0, errors.New("sqlite outbox: RecoverStuck wired in phase 4 follow-up")

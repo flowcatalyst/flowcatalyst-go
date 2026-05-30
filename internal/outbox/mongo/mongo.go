@@ -192,6 +192,19 @@ func (r *Repository) MarkFailed(ctx context.Context, ids []string, status common
 // RecoverStuck resets IN_PROGRESS docs older than olderThan back to PENDING.
 // updated_at is an RFC3339 string, so the cutoff is compared lexically (RFC3339
 // is lexicographically ordered for a fixed offset — the SDK writes UTC "Z").
+// Release returns claimed (IN_PROGRESS) docs to PENDING without a failure
+// penalty. Used by block-on-error to re-run a group's undispatched items in
+// order behind a failed one.
+func (r *Repository) Release(ctx context.Context, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := r.coll.UpdateMany(ctx,
+		bson.M{"id": bson.M{"$in": ids}, "status": int(common.OutboxInProgress)},
+		bson.M{"$set": bson.M{"status": int(common.OutboxPending), "updated_at": nowISO()}})
+	return err
+}
+
 func (r *Repository) RecoverStuck(ctx context.Context, olderThan time.Duration) (int, error) {
 	cutoff := time.Now().UTC().Add(-olderThan).Format(time.RFC3339)
 	res, err := r.coll.UpdateMany(ctx,

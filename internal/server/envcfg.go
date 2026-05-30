@@ -67,6 +67,11 @@ type EnvCfg struct {
 	OutboxBatchSize         int
 	OutboxMaxInFlight       int
 	OutboxPollIntervalMS    int
+	// OB7 max concurrent message groups (0 = use default 10). OB4 block-on-error
+	// (default true): stop a group on a failing item, releasing the rest to
+	// re-run in order behind it.
+	OutboxMaxConcurrentGroups int
+	OutboxBlockOnError        bool
 	// Backend selection: "postgres" (default, shared pool) or "mongo".
 	OutboxBackend  string
 	OutboxMongoURI string
@@ -148,14 +153,16 @@ func LoadEnv() EnvCfg {
 		// outbox CLI; FC_API_BASE_URL / FC_API_TOKEN align with the Rust
 		// fc-outbox-processor binary; FC_OUTBOX_PLATFORM_* + FLOWCATALYST_URL
 		// kept as aliases.
-		OutboxPlatformURL:       envFirst("FC_OUTBOX_PLATFORM_URL", "FC_OUTBOX_API_URL", "FC_API_BASE_URL", "FLOWCATALYST_URL", "", ""),
-		OutboxPlatformAuthToken: envFirst("FC_OUTBOX_PLATFORM_AUTH_TOKEN", "FC_OUTBOX_TOKEN", "FC_API_TOKEN", "", ""),
-		OutboxBatchSize:         envInt("FC_OUTBOX_BATCH_SIZE", 0),
-		OutboxMaxInFlight:       envInt("FC_OUTBOX_MAX_IN_FLIGHT", 0),
-		OutboxPollIntervalMS:    envInt("FC_OUTBOX_POLL_INTERVAL_MS", 0),
-		OutboxBackend:           envOr("FC_OUTBOX_BACKEND", "postgres"),
-		OutboxMongoURI:          envFirst("FC_OUTBOX_MONGO_URI", "FC_OUTBOX_DB_URL", "", ""),
-		OutboxMongoDB:           envOr("FC_OUTBOX_MONGO_DB", "flowcatalyst"),
+		OutboxPlatformURL:         envFirst("FC_OUTBOX_PLATFORM_URL", "FC_OUTBOX_API_URL", "FC_API_BASE_URL", "FLOWCATALYST_URL", "", ""),
+		OutboxPlatformAuthToken:   envFirst("FC_OUTBOX_PLATFORM_AUTH_TOKEN", "FC_OUTBOX_TOKEN", "FC_API_TOKEN", "", ""),
+		OutboxBatchSize:           envInt("FC_OUTBOX_BATCH_SIZE", 0),
+		OutboxMaxInFlight:         envInt("FC_OUTBOX_MAX_IN_FLIGHT", 0),
+		OutboxPollIntervalMS:      envInt("FC_OUTBOX_POLL_INTERVAL_MS", 0),
+		OutboxMaxConcurrentGroups: envIntAlias("FC_OUTBOX_MAX_CONCURRENT_GROUPS", "FC_MAX_CONCURRENT_GROUPS", 0),
+		OutboxBlockOnError:        envBool("FC_OUTBOX_BLOCK_ON_ERROR", true),
+		OutboxBackend:             envOr("FC_OUTBOX_BACKEND", "postgres"),
+		OutboxMongoURI:            envFirst("FC_OUTBOX_MONGO_URI", "FC_OUTBOX_DB_URL", "", ""),
+		OutboxMongoDB:             envOr("FC_OUTBOX_MONGO_DB", "flowcatalyst"),
 
 		RouterConfigURL:        os.Getenv("FLOWCATALYST_CONFIG_URL"),
 		RouterDevMode:          envBool("FLOWCATALYST_DEV_MODE", false),

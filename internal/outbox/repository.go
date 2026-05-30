@@ -50,6 +50,13 @@ type Repository interface {
 	// the status' retryability AND the max-retries cap. There is no
 	// next-retry-at backoff column upstream.
 	MarkFailed(ctx context.Context, ids []string, status common.OutboxStatus, msg string, requeue bool) error
+	// Release returns the given claimed rows to PENDING WITHOUT a failure
+	// penalty (no retry_count bump, no error_message), for the next poll to
+	// re-claim. Used by block-on-error: when a group's item fails, the rest of
+	// that group's already-claimed items are released un-dispatched so they
+	// re-run in order behind the failed item rather than being delivered ahead
+	// of it. Only affects rows still IN_PROGRESS.
+	Release(ctx context.Context, ids []string) error
 	// RecoverStuck resets rows stuck in IN_PROGRESS (claimed but never
 	// resolved — e.g. the processor crashed mid-dispatch) whose updated_at is
 	// older than olderThan, returning them to PENDING for re-claim. Returns
