@@ -27,7 +27,8 @@ const mcpLocalClientID = "flowcatalyst-mcp-local"
 // mirrors the Rust fc-dev mcp_bootstrap: if the client already exists it is a
 // no-op; otherwise it creates a SERVICE principal (super-admin, anchor scope) +
 // service account + a CONFIDENTIAL client_credentials OAuth client, then writes
-// the plaintext secret to ~/.cache/flowcatalyst-dev/mcp-credentials.json (0600).
+// the plaintext secret to mcp-credentials.json in the OS cache dir (macOS
+// ~/Library/Caches, Linux ~/.cache; see mcp.CredentialsPath), mode 0600.
 //
 // Dev-only: it is called only from `fc-dev start`, which is the dev monolith.
 // Requires a stable FLOWCATALYST_APP_KEY (ensured by start.go) so the stored

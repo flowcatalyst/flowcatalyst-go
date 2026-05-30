@@ -268,11 +268,24 @@ func StartMCP(ctx context.Context, cfg EnvCfg) {
 	// Build the MCP server from resolved config: client_id+secret →
 	// client_credentials token manager; secret-only → static bearer; neither →
 	// unauthenticated (localhost in-process).
-	srv := mcp.New(mcp.Config{
+	mcfg := mcp.Config{
 		BaseURL:      platformURL,
 		ClientID:     cfg.MCPClientID,
 		ClientSecret: cfg.MCPClientSecret,
-	})
+	}
+	// When no creds came from the env, fall back to the fc-dev-bootstrapped
+	// credentials file (~/.cache/flowcatalyst-dev/mcp-credentials.json) so
+	// `fc-dev start --mcp` authenticates via client_credentials like the
+	// standalone `fc-dev mcp` — otherwise the in-process tools 403 against the
+	// auth-gated platform. The bootstrap runs before StartMCP, so the file
+	// exists by now. BaseURL stays the local listener.
+	if mcfg.ClientID == "" && mcfg.ClientSecret == "" {
+		if fileCfg := mcp.LoadConfig(); fileCfg.ClientID != "" || fileCfg.ClientSecret != "" {
+			mcfg.ClientID = fileCfg.ClientID
+			mcfg.ClientSecret = fileCfg.ClientSecret
+		}
+	}
+	srv := mcp.New(mcfg)
 
 	r := chi.NewRouter()
 	r.Handle("/mcp", srv.HTTPHandler()) // streamable-HTTP: POST + GET(SSE) + DELETE

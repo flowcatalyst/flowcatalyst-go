@@ -143,7 +143,8 @@ func newPlatformClient(cfg Config) *client.FlowCatalystClient {
 // "start fc-dev first" hint, matching Rust.
 var errNoCredentials = errors.New(
 	"no MCP credentials: set FLOWCATALYST_CLIENT_ID/FLOWCATALYST_CLIENT_SECRET, " +
-		"or run `fc-dev start` to bootstrap ~/.cache/flowcatalyst-dev/mcp-credentials.json")
+		"or run `fc-dev start` to bootstrap the mcp-credentials.json in the OS cache dir " +
+		"(macOS ~/Library/Caches, Linux ~/.cache; see CredentialsPath)")
 
 // RequireCredentials returns errNoCredentials when the config has neither a
 // client_id/secret pair nor a static secret. The standalone server uses this
