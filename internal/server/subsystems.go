@@ -230,6 +230,26 @@ func StartOutboxProcessor(ctx context.Context, pool *pgxpool.Pool, cfg EnvCfg) {
 
 	p := outbox.NewProcessor(pcfg, repo)
 	p.IsLeader = newLeaderGate(ctx, cfg, "outbox")
+
+	// Operational state-machine admin API (pause/resume/unblock/skip groups),
+	// localhost-only, when FC_OUTBOX_ADMIN_PORT is set.
+	if cfg.OutboxAdminPort > 0 {
+		addr := fmt.Sprintf("127.0.0.1:%d", cfg.OutboxAdminPort)
+		adminSrv := &http.Server{Addr: addr, Handler: p.AdminHandler(), ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			slog.Info("outbox admin API listening", "addr", addr)
+			if err := adminSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("outbox admin listener exited", "err", err)
+			}
+		}()
+		go func() {
+			<-ctx.Done()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = adminSrv.Shutdown(shutdownCtx)
+		}()
+	}
+
 	slog.Info("outbox processor started", "platform_url", cfg.OutboxPlatformURL, "backend", cfg.OutboxBackend)
 	p.Run(ctx)
 	slog.Info("outbox processor stopped")

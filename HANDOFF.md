@@ -61,13 +61,19 @@ file is unaffected).
   documented as a known parity gap in `docs/api-parity.md` (§Authentication).
   Deep-links a downstream OAuth client's user into a named upstream IdP;
   only needed for that chained case. Normal SSO uses `/auth/oidc/login`.
-- In-memory per-instance rate-limit governor (perf layer atop the
-  distributed store; `rate_limit_middleware.rs`).
+  (Decision 2026-05-28: documented as a known gap rather than built.)
 
-**Done since:** `max_age` enforcement in authorize (2026-05-28) —
-`sessiontoken.Claims` now carries `IssuedAt`, `ValidateSession` returns it,
-and authorize re-authenticates a session older than `max_age`
-(login_required under prompt=none).
+**Done since (2026-05-28):**
+- `max_age` enforcement in authorize — `sessiontoken.Claims` now carries
+  `IssuedAt`, `ValidateSession` returns it, and authorize re-authenticates a
+  session older than `max_age` (login_required under prompt=none).
+- In-memory rate-limit governor (`shared/ratelimit/governor.go`) — per-
+  instance keyed token bucket (x/time/rate) layered in front of the
+  distributed store on `/oauth/token` (per-IP middleware + per-client_id
+  inline). 1:1 with `rate_limit_middleware.rs`. The `/auth/login`
+  per-IP governor (Rust `auth_default`) is NOT wired — login relies on the
+  per-account `loginbackoff`; wire it if broad login scanning becomes a
+  concern.
 
 ### Parity references
 - Rust source: `crates/fc-platform/src/auth/{auth_service,oauth_api,

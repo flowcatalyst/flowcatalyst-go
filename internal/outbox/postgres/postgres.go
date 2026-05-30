@@ -173,6 +173,18 @@ func (r *Repository) Release(ctx context.Context, ids []string) error {
 	return err
 }
 
+// Requeue resets rows to PENDING from ANY status, clearing retry_count + error
+// for a fresh attempt (the state machine's Unblock-retry of a poison item).
+func (r *Repository) Requeue(ctx context.Context, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := r.pool.Exec(ctx,
+		`UPDATE outbox_messages SET status = 0, retry_count = 0, error_message = NULL, updated_at = NOW()
+		  WHERE id = ANY($1)`, ids)
+	return err
+}
+
 func (r *Repository) RecoverStuck(ctx context.Context, olderThan time.Duration) (int, error) {
 	cutoff := time.Now().Add(-olderThan)
 	tag, err := r.pool.Exec(ctx,

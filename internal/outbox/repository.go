@@ -57,6 +57,11 @@ type Repository interface {
 	// re-run in order behind the failed item rather than being delivered ahead
 	// of it. Only affects rows still IN_PROGRESS.
 	Release(ctx context.Context, ids []string) error
+	// Requeue resets the given rows to PENDING regardless of their current
+	// status, clearing retry_count + error, for a fresh attempt. Used by the
+	// operational state machine's Unblock control to retry a poison item that
+	// had blocked its message group.
+	Requeue(ctx context.Context, ids []string) error
 	// RecoverStuck resets rows stuck in IN_PROGRESS (claimed but never
 	// resolved — e.g. the processor crashed mid-dispatch) whose updated_at is
 	// older than olderThan, returning them to PENDING for re-claim. Returns

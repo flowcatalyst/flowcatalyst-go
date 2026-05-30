@@ -74,6 +74,95 @@ type DispatchOutcome struct {
 	Message string
 }
 
+// SendBatch POSTs multiple items of the SAME ItemType in one request and
+// returns a per-item outcome keyed by item id (OB4 multi-item batching, 1:1
+// with Rust dispatch_batch). All items must share items[0].ItemType (the
+// caller groups by type). A transport/parse error or a non-2xx status fails the
+// whole batch with the mapped status; on a 2xx the per-item {results:[]} body
+// is honoured, and any item missing from results is INTERNAL_ERROR (retryable).
+func (d *HTTPDispatcher) SendBatch(ctx context.Context, items []Item) map[string]DispatchOutcome {
+	if len(items) == 0 {
+		return map[string]DispatchOutcome{}
+	}
+	if len(items) == 1 {
+		return map[string]DispatchOutcome{items[0].ID: d.Send(ctx, items[0])}
+	}
+
+	endpoint := d.platformURL + items[0].ItemType.APIPath()
+	payloads := make([]json.RawMessage, len(items))
+	for i, it := range items {
+		payloads[i] = it.Payload
+	}
+	body, err := json.Marshal(map[string]any{"items": payloads})
+	if err != nil {
+		return failAll(items, common.OutboxBadRequest, "marshal: "+err.Error())
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return failAll(items, common.OutboxInternalError, "build: "+err.Error())
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if d.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+d.authToken)
+	}
+
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return failAll(items, common.OutboxInternalError, "request: "+err.Error())
+	}
+	defer resp.Body.Close()
+
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		var br batchResponse
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+		if err := json.Unmarshal(raw, &br); err != nil || len(br.Results) == 0 {
+			return failAll(items, common.OutboxInternalError, "parse results: "+truncate(string(raw), 200))
+		}
+		byID := make(map[string]itemResult, len(br.Results))
+		for _, r := range br.Results {
+			byID[r.ID] = r
+		}
+		out := make(map[string]DispatchOutcome, len(items))
+		for _, it := range items {
+			r, ok := byID[it.ID]
+			if !ok {
+				out[it.ID] = DispatchOutcome{Status: common.OutboxInternalError, Message: "no per-item result returned"}
+				continue
+			}
+			st, ok := parseItemStatus(r.Status)
+			if !ok {
+				out[it.ID] = DispatchOutcome{Status: common.OutboxInternalError, Message: "unknown item status: " + r.Status}
+				continue
+			}
+			out[it.ID] = DispatchOutcome{Status: st, Message: r.Error}
+		}
+		return out
+	case resp.StatusCode == http.StatusUnauthorized:
+		return failAll(items, common.OutboxUnauthorized, "401")
+	case resp.StatusCode == http.StatusForbidden:
+		return failAll(items, common.OutboxForbidden, "403")
+	case resp.StatusCode == http.StatusBadGateway,
+		resp.StatusCode == http.StatusServiceUnavailable,
+		resp.StatusCode == http.StatusGatewayTimeout:
+		return failAll(items, common.OutboxGatewayError, fmt.Sprintf("%d", resp.StatusCode))
+	case resp.StatusCode >= 400 && resp.StatusCode < 500:
+		return failAll(items, common.OutboxBadRequest, fmt.Sprintf("%d", resp.StatusCode))
+	default:
+		return failAll(items, common.OutboxInternalError, fmt.Sprintf("%d", resp.StatusCode))
+	}
+}
+
+// failAll assigns the same outcome to every item (transport/HTTP-level failure).
+func failAll(items []Item, st common.OutboxStatus, msg string) map[string]DispatchOutcome {
+	m := make(map[string]DispatchOutcome, len(items))
+	for _, it := range items {
+		m[it.ID] = DispatchOutcome{Status: st, Message: msg}
+	}
+	return m
+}
+
 // Send POSTs the item's payload to the appropriate batch endpoint and
 // classifies the response into an OutboxStatus.
 func (d *HTTPDispatcher) Send(ctx context.Context, item Item) DispatchOutcome {

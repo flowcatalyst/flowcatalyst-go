@@ -205,6 +205,18 @@ func (r *Repository) Release(ctx context.Context, ids []string) error {
 	return err
 }
 
+// Requeue resets docs to PENDING from any status, clearing retry_count + error
+// for a fresh attempt (the state machine's Unblock-retry of a poison item).
+func (r *Repository) Requeue(ctx context.Context, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := r.coll.UpdateMany(ctx,
+		bson.M{"id": bson.M{"$in": ids}},
+		bson.M{"$set": bson.M{"status": int(common.OutboxPending), "retry_count": 0, "error_message": "", "updated_at": nowISO()}})
+	return err
+}
+
 func (r *Repository) RecoverStuck(ctx context.Context, olderThan time.Duration) (int, error) {
 	cutoff := time.Now().UTC().Add(-olderThan).Format(time.RFC3339)
 	res, err := r.coll.UpdateMany(ctx,
