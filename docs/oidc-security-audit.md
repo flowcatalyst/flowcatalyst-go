@@ -76,13 +76,18 @@ control · **L** robustness/parity.
 - **Client-secret decryption failure is fatal** in Go; Rust falls back to the
   raw (plaintext) value with a warning.
 
-### Open / lower-priority (not yet addressed)
+### Addressed after the first pass
+
+| Sev | Item | Resolution |
+|-----|------|-----------|
+| M | **Rate limiting on the OIDC bridge** | Per-IP token-bucket governor (`FC_OIDC_RATE_PER_MIN`=60 / `FC_OIDC_BURST`=30) on `/auth/oidc/*` via `ratelimit.GovernorMiddleware` — blunts auth-code probing / DoS. |
+| L | **Empty `return_url`** | Now defaults to `/dashboard` (Rust parity) and always redirects, instead of emitting JSON-200. |
+| — | **Chained OAuth flow** | NOT a gap — Go is SPA-mediated, not server-mediated. `/oauth/authorize` stashes the request (`PendingAuth`) and bounces to `/auth/login?oauth=true&…`; the SPA drives login (incl. SSO via `/auth/oidc/login` with the rebuilt authorize URL as `return_url`); the callback redirects back to that relative `/oauth/authorize?…` URL (which passes the open-redirect sanitiser). No server change needed. The `login_state.oauth_*` columns are vestigial (carried from the Rust schema) and unused in this design. |
+
+### Open / lower-priority (not addressed)
 
 | Sev | Item | Note |
 |-----|------|------|
-| M | **No rate limiting on `/auth/oidc/callback`** | Rust lacks it too. Consider a per-IP throttle to blunt code-enumeration / DoS. |
-| L | **Empty `return_url` → JSON-200** instead of a dashboard redirect | Rust defaults to `/dashboard`. Minor UX; SPA normally passes `return_url`. |
-| L | **Chained OAuth flow not implemented** | When the login was started inside an `/oauth/authorize` flow (`login_state.oauth_client_id`), Rust redirects back to `/oauth/authorize`; the Go SessionWriter does not. Functional gap, not security. |
 | — | **Dead code** | `LoginStateRepo.FindByState` / `OIDCLoginState.IsExpired` are unused after the `Consume` switch; safe to remove later. |
 
 ---

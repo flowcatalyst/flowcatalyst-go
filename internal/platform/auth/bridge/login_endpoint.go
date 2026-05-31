@@ -409,13 +409,17 @@ func (e *LoginEndpoint) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	// The state row was already consumed atomically up-front, so no cleanup here.
 
-	// Sanitise the post-login redirect target: only a same-site relative path is
-	// allowed. Absolute URLs and protocol-relative ("//host") / backslash forms
-	// are open-redirect vectors, so they're dropped (the SessionWriter then
-	// falls back to its default landing page).
-	returnURL := ""
+	// Post-login redirect target. Only a same-site relative path is allowed
+	// (absolute / protocol-relative "//host" / backslash forms are open-redirect
+	// vectors). Anything unsafe — including an empty return_url — falls back to
+	// the dashboard, so an SSO round-trip always lands somewhere useful. A
+	// chained OAuth login arrives here with return_url = "/oauth/authorize?…"
+	// (relative), which passes the sanitiser and resumes the OAuth flow.
+	returnURL := "/dashboard"
 	if loginState.ReturnURL != nil {
-		returnURL = safeRelativeReturnURL(*loginState.ReturnURL)
+		if safe := safeRelativeReturnURL(*loginState.ReturnURL); safe != "" {
+			returnURL = safe
+		}
 	}
 	e.SessionWriter(w, r, p.ID, returnURL)
 }

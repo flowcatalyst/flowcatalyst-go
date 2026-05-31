@@ -61,6 +61,17 @@ func OAuthTokenClientGovernorFromEnv() GovernorConfig {
 	}
 }
 
+// OIDCBridgeGovernorFromEnv reads FC_OIDC_RATE_PER_MIN (60) and FC_OIDC_BURST
+// (30) — the per-IP quota on the /auth/oidc/* bridge routes (login start +
+// callback). Blunts authorization-code probing / DoS without impeding a real
+// interactive login.
+func OIDCBridgeGovernorFromEnv() GovernorConfig {
+	return GovernorConfig{
+		PerMinute: envU32("FC_OIDC_RATE_PER_MIN", 60),
+		Burst:     envU32("FC_OIDC_BURST", 30),
+	}
+}
+
 // NewGovernor builds a Governor for the supplied quota. PerMinute or Burst
 // below 1 are clamped to 1 (matching Rust's max(1)).
 func NewGovernor(cfg GovernorConfig) *Governor {
