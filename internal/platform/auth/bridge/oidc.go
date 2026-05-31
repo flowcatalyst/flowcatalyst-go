@@ -22,7 +22,8 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
-	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/emaildomainmapping"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/identityprovider"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/shared/encryption"
 )
 
@@ -32,7 +33,8 @@ import (
 // (to /.well-known/openid-configuration) that we only want to do once
 // per IDP per process.
 type Bridge struct {
-	authRepo *auth.Repository
+	mappings *emaildomainmapping.Repository
+	idps     *identityprovider.Repository
 	enc      *encryption.Service // optional; decrypts OIDCClientSecretRef
 
 	mu    sync.Mutex
@@ -48,75 +50,83 @@ type resolved struct {
 // NewBridge wires the bridge. enc may be nil — confidential OIDC clients
 // will fail to authenticate against the external IDP in that case, but
 // public clients (no client secret) still work.
-func NewBridge(authRepo *auth.Repository, enc *encryption.Service) *Bridge {
-	return &Bridge{authRepo: authRepo, enc: enc, cache: make(map[string]*resolved)}
+func NewBridge(mappings *emaildomainmapping.Repository, idps *identityprovider.Repository, enc *encryption.Service) *Bridge {
+	return &Bridge{mappings: mappings, idps: idps, enc: enc, cache: make(map[string]*resolved)}
 }
 
-// ResolveForEmail picks the right ClientAuthConfig (and therefore the
-// right OIDC issuer) for the user with the supplied email. Returns the
-// OIDC client + token verifier + oauth2 config; the caller drives the
-// redirect / callback flow.
-func (b *Bridge) ResolveForEmail(ctx context.Context, email string) (*resolved, *auth.ClientAuthConfig, error) {
+// ResolveForEmail resolves the OIDC client for the user's email domain via the
+// email-domain mapping → identity provider chain, exactly as Rust's oidc_login
+// does (find_by_email_domain → identity_provider.find_by_id). Returns the OIDC
+// client + the IdP + the mapping; the caller drives the redirect / callback and
+// persists the IdP + mapping ids in the login state.
+func (b *Bridge) ResolveForEmail(ctx context.Context, email string) (*resolved, *identityprovider.IdentityProvider, *emaildomainmapping.EmailDomainMapping, error) {
 	domain := emailDomain(email)
 	if domain == "" {
-		return nil, nil, errors.New("invalid email: no domain")
+		return nil, nil, nil, errors.New("invalid email: no domain")
 	}
-	cfg, err := b.authRepo.ClientAuthConfigs.FindByEmailDomain(ctx, domain)
+	mapping, err := b.mappings.FindByEmailDomain(ctx, domain)
 	if err != nil {
-		return nil, nil, fmt.Errorf("client_auth_config lookup: %w", err)
+		return nil, nil, nil, fmt.Errorf("email_domain_mapping lookup: %w", err)
 	}
-	if cfg == nil {
-		return nil, nil, errors.New("no auth config for domain " + domain)
+	if mapping == nil {
+		return nil, nil, nil, errors.New("no email-domain mapping for " + domain)
 	}
-	if cfg.AuthProvider != auth.ProviderOIDC {
-		return nil, cfg, nil // internal provider; no OIDC bridge needed
+	idp, err := b.idps.FindByID(ctx, mapping.IdentityProviderID)
+	if err != nil {
+		return nil, nil, mapping, fmt.Errorf("identity_provider lookup: %w", err)
 	}
-	if cfg.OIDCIssuerURL == nil || cfg.OIDCClientID == nil {
-		return nil, cfg, errors.New("OIDC config missing issuer or client ID")
+	if idp == nil {
+		return nil, nil, mapping, errors.New("identity provider not found: " + mapping.IdentityProviderID)
+	}
+	if idp.Type != identityprovider.TypeOIDC {
+		return nil, idp, mapping, nil // internal provider; no OIDC bridge needed
+	}
+	if idp.OIDCIssuerURL == nil || idp.OIDCClientID == nil {
+		return nil, idp, mapping, errors.New("OIDC config missing issuer or client ID")
 	}
 
-	key := *cfg.OIDCIssuerURL + "|" + *cfg.OIDCClientID
+	key := *idp.OIDCIssuerURL + "|" + *idp.OIDCClientID
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if r, ok := b.cache[key]; ok {
-		return r, cfg, nil
+		return r, idp, mapping, nil
 	}
 
-	provider, err := oidc.NewProvider(ctx, *cfg.OIDCIssuerURL)
+	provider, err := oidc.NewProvider(ctx, *idp.OIDCIssuerURL)
 	if err != nil {
-		return nil, cfg, fmt.Errorf("oidc.NewProvider: %w", err)
+		return nil, idp, mapping, fmt.Errorf("oidc.NewProvider: %w", err)
 	}
-	clientSecret, err := b.resolveClientSecret(cfg)
+	clientSecret, err := b.resolveClientSecret(idp.OIDCClientSecretRef)
 	if err != nil {
-		return nil, cfg, err
+		return nil, idp, mapping, err
 	}
 	r := &resolved{
 		provider: provider,
-		verifier: provider.Verifier(&oidc.Config{ClientID: *cfg.OIDCClientID}),
+		verifier: provider.Verifier(&oidc.Config{ClientID: *idp.OIDCClientID}),
 		oauth: &oauth2.Config{
-			ClientID:     *cfg.OIDCClientID,
+			ClientID:     *idp.OIDCClientID,
 			ClientSecret: clientSecret,
 			Endpoint:     provider.Endpoint(),
 			Scopes:       []string{oidc.ScopeOpenID, "profile", "email"},
 		},
 	}
 	b.cache[key] = r
-	return r, cfg, nil
+	return r, idp, mapping, nil
 }
 
-// resolveClientSecret decrypts cfg.OIDCClientSecretRef using the
+// resolveClientSecret decrypts the IdP's OIDCClientSecretRef using the
 // configured encryption service. Empty ref → no secret (public client).
 // If a ref is present but no encryption service is configured, or
 // decryption fails, returns an error so the caller surfaces a clear
 // misconfiguration rather than silently mis-authing.
-func (b *Bridge) resolveClientSecret(cfg *auth.ClientAuthConfig) (string, error) {
-	if cfg.OIDCClientSecretRef == nil || *cfg.OIDCClientSecretRef == "" {
+func (b *Bridge) resolveClientSecret(secretRef *string) (string, error) {
+	if secretRef == nil || *secretRef == "" {
 		return "", nil
 	}
 	if b.enc == nil {
 		return "", errors.New("OIDC client_secret_ref present but no encryption service configured (set FLOWCATALYST_APP_KEY)")
 	}
-	pt, err := b.enc.Decrypt(*cfg.OIDCClientSecretRef)
+	pt, err := b.enc.Decrypt(*secretRef)
 	if err != nil {
 		return "", fmt.Errorf("decrypt OIDC client secret: %w", err)
 	}

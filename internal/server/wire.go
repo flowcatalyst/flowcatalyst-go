@@ -364,7 +364,7 @@ func WirePlatform(r chi.Router, pool *pgxpool.Pool, cfg EnvCfg) error {
 		// bridge will surface a clear error if a confidential OIDC config
 		// needs a secret and the key isn't set.
 		appEnc, _ := encryption.FromEnv()
-		bridgeClient := bridge.NewBridge(authRepo, appEnc)
+		bridgeClient := bridge.NewBridge(edmRepo, idpRepo, appEnc)
 		loginStateRepo := bridge.NewLoginStateRepo(pool)
 		bridgeLoginEP := bridge.NewLoginEndpoint(bridgeClient, loginStateRepo, principalRepo, edmRepo,
 			roleRepo, authRepo.IdpRoleMappings, uow, authRepo.OAuthClients)

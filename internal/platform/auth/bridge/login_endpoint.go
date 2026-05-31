@@ -244,7 +244,7 @@ func (e *LoginEndpoint) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve uses email; synthesise one with a throwaway local-part.
-	resolved, cfg, err := e.bridge.ResolveForEmail(r.Context(), "x@"+domain)
+	resolved, idp, mapping, err := e.bridge.ResolveForEmail(r.Context(), "x@"+domain)
 	if err != nil || resolved == nil {
 		httperror.Write(w, httperror.BadRequest("OIDC_NOT_CONFIGURED",
 			"OIDC is not configured for this domain"))
@@ -255,9 +255,7 @@ func (e *LoginEndpoint) handleLogin(w http.ResponseWriter, r *http.Request) {
 	nonce := randString(32)
 	verifier := randString(64)
 	challenge := pkceChallenge(verifier)
-	loginState := NewLoginState(state, domain,
-		"", // identityProviderID — populated once the IDP table is wired in
-		cfg.ID, nonce, verifier)
+	loginState := NewLoginState(state, domain, idp.ID, mapping.ID, nonce, verifier)
 	if returnURL != "" {
 		loginState.ReturnURL = &returnURL
 	}
@@ -300,7 +298,7 @@ func (e *LoginEndpoint) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resolved, _, err := e.bridge.ResolveForEmail(r.Context(),
+	resolved, _, _, err := e.bridge.ResolveForEmail(r.Context(),
 		"x@"+loginState.EmailDomain)
 	if err != nil || resolved == nil {
 		httperror.Write(w, httperror.BadRequest("OIDC_NOT_CONFIGURED", "OIDC config lost"))
