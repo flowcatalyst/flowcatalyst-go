@@ -134,7 +134,7 @@ func LoadEnv() EnvCfg {
 		OutboxEnabled:       envBoolAlias("FC_OUTBOX_ENABLED", "OUTBOX_PROCESSOR_ENABLED", false),
 		MCPEnabled:          envBool("FC_MCP_ENABLED", false),
 
-		RouterHTTPPrefix: envOr("FC_ROUTER_HTTP_PREFIX", ""),
+		RouterHTTPPrefix: envOr("FC_ROUTER_HTTP_PREFIX", "/router"),
 		DefaultBroker:    envOr("FC_DEFAULT_BROKER", ""),
 		MCPPort:          envInt("FC_MCP_PORT", 8090),
 		MCPBind:          envOr("FC_MCP_BIND", "127.0.0.1"),

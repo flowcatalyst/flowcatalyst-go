@@ -79,20 +79,12 @@ func Run(ctx context.Context, pool *pgxpool.Pool, cfg EnvCfg, opts RunOptions) e
 		if routerErr != nil {
 			return fmt.Errorf("router init: %w", routerErr)
 		}
-		// Standalone router serves at root (/monitoring/dashboard, /metrics, …)
-		// for Rust fc-router parity; combined with the platform it's namespaced
-		// under /router so it can't collide with the platform API. An explicit
-		// FC_ROUTER_HTTP_PREFIX always wins.
 		prefix := cfg.RouterHTTPPrefix
-		if prefix == "" && cfg.PlatformEnabled {
+		if prefix == "" {
 			prefix = "/router"
 		}
 		MountRouterHTTP(r, prefix, routerSrv, streamHealth, cfg)
-		shown := prefix
-		if shown == "" {
-			shown = "/"
-		}
-		slog.Info("router HTTP mounted", "prefix", shown)
+		slog.Info("router HTTP mounted", "prefix", prefix)
 	}
 
 	if opts.ExtraAPIRoutes != nil {
@@ -204,10 +196,12 @@ func MountRouterHTTP(r chi.Router, prefix string, srv *router.Server, streamHeal
 	if streamHealth != nil {
 		state.StreamHealth = streamHealthBridge{svc: streamHealth}
 	}
-	mount := func(sub chi.Router) {
-		// BasicAuth on the router surface. Disabled when no creds set.
+	r.Route(prefix, func(sub chi.Router) {
+		// BasicAuth on the router prefix. Disabled when no creds set.
 		sub.Use(routerapi.BasicAuthMiddleware(resolveRouterAuth()))
 		humaCfg := huma.DefaultConfig("FlowCatalyst Router API", routerapi.Version)
+		// Nest the spec under the prefix so external tooling can grab
+		// the OpenAPI doc at <prefix>/openapi.json.
 		// Drop huma's $schema link injection (Rust never emits it), matching
 		// the platform API config in wire.go.
 		humaCfg.SchemasPath = ""
@@ -215,14 +209,7 @@ func MountRouterHTTP(r chi.Router, prefix string, srv *router.Server, streamHeal
 		routerapi.Register(api, state)
 		routerapi.MountDashboard(sub)
 		sub.Mount("/metrics", routerapi.PrometheusHandler(state))
-	}
-	// An empty prefix means "serve at root" (standalone router, Rust parity).
-	// chi.Route rejects an empty pattern, so use a Group for the root case.
-	if prefix == "" || prefix == "/" {
-		r.Group(mount)
-	} else {
-		r.Route(prefix, mount)
-	}
+	})
 }
 
 // resolveRouterAuth reads the router HTTP BasicAuth config, accepting the Rust
