@@ -68,7 +68,7 @@ func Authenticator(cfg AuthConfig) func(http.Handler) http.Handler {
 			token, fromCookie := extractToken(r)
 			switch {
 			case token != "":
-				ac, err := introspect(ctx, cfg.Provider, token)
+				ac, err := introspect(ctx, cfg.Provider, token, fromCookie)
 				if err != nil {
 					// A stale / invalid fc_session cookie must not hard-fail the
 					// request: the browser replays it on every call — including
@@ -136,7 +136,7 @@ func extractToken(r *http.Request) (token string, fromCookie bool) {
 // Cookie + Bearer transports share this path. The line between this
 // local validation path and the `/oauth/introspect` endpoint is
 // deliberate — see ADR-0001.
-func introspect(ctx context.Context, p *provider.Provider, token string) (*auth.AuthContext, error) {
+func introspect(ctx context.Context, p *provider.Provider, token string, fromCookie bool) (*auth.AuthContext, error) {
 	c, err := p.ValidateSessionToken(ctx, token)
 	if err != nil {
 		return nil, err
@@ -144,11 +144,34 @@ func introspect(ctx context.Context, p *provider.Provider, token string) (*auth.
 	if c == nil {
 		return nil, nil
 	}
-	// OAuth access tokens (minted by authservice) carry roles but no
-	// permissions claim — matching Rust, which never bakes permissions
-	// into the JWT. Derive them from the roles here so permission-gated
-	// handlers see the same set regardless of token source. Session-cookie
-	// tokens already carry permissions; keep those as-is.
+
+	// Session cookies (the SPA) carry only identity (subject). Resolve the
+	// mutable authorization data — scope, roles, clients, applications,
+	// permissions — FRESH from the DB on every request, so a role/permission/
+	// scope change takes effect immediately and the cookie stays tiny. A
+	// deactivated or deleted principal resolves to an error → the session is
+	// rejected.
+	if fromCookie {
+		rc, rerr := p.ResolveClaims(ctx, c.Subject)
+		if rerr != nil {
+			return nil, rerr
+		}
+		return &auth.AuthContext{
+			PrincipalID:  rc.Subject,
+			Scope:        auth.Scope(rc.Scope),
+			Email:        rc.Email,
+			Clients:      rc.Clients,
+			Roles:        rc.Roles,
+			Applications: rc.Applications,
+			Permissions:  rc.Permissions,
+		}, nil
+	}
+
+	// Bearer transport (OAuth access tokens minted by authservice) is
+	// self-contained for stateless validation: it carries roles but no
+	// permissions claim — matching Rust, which never bakes permissions into the
+	// JWT. Derive them from the roles here so permission-gated handlers see the
+	// same set regardless of token source.
 	perms := c.Permissions
 	if len(perms) == 0 && len(c.Roles) > 0 {
 		if derived, derr := p.FlattenPermissions(ctx, c.Roles); derr == nil {

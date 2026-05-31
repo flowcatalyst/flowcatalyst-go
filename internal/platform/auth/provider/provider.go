@@ -212,14 +212,19 @@ func (p *Provider) MintSessionToken(ctx context.Context, principalID string, ttl
 	if err != nil {
 		return "", fmt.Errorf("build claims: %w", err)
 	}
+	// The session cookie carries ONLY stable identity (subject + email). All
+	// mutable authorization data — scope, roles, clients, applications,
+	// permissions — is intentionally left out and resolved fresh from the DB on
+	// every request by the auth middleware (see middleware.introspect). Two
+	// reasons:
+	//   1. Correctness: a signed cookie can't be updated until re-login, so
+	//      baking in roles/permissions would serve stale authz after a change.
+	//   2. Size: the flattened permission set for a privileged principal can
+	//      push the JWT past the browser's ~4KB per-cookie limit, making the
+	//      browser silently DROP fc_session so the session never establishes.
 	return sessiontoken.Mint(sessiontoken.Claims{
-		Subject:      c.Subject,
-		Scope:        c.Scope,
-		Email:        c.Email,
-		Clients:      c.Clients,
-		Roles:        c.Roles,
-		Applications: c.Applications,
-		Permissions:  c.Permissions,
+		Subject: c.Subject,
+		Email:   c.Email,
 	}, p.signingKey, p.cfg.Issuer, ttl)
 }
 
