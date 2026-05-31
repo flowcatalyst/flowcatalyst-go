@@ -1,19 +1,25 @@
 -- Baseline the goose migration ledger for a drop-in deployment.
 --
+-- NOTE (2026-05): this manual step is NO LONGER REQUIRED for a normal Rust
+-- drop-in. internal/migrate.bootstrap() now auto-seeds the goose ledger when
+-- it detects the Rust platform's `_schema_migrations` tracker, and — as a
+-- final safety net — when it finds a populated-but-untracked schema (the
+-- `tnt_clients` table). This script remains as a manual override / belt-and-
+-- suspenders for unusual states (e.g. a populated DB whose tracker was wiped).
+--
 -- WHEN TO RUN
 --   On demand, against an EXISTING FlowCatalyst database whose schema was
 --   already applied by another implementation (e.g. the Rust platform, which
---   tracks its own history in `_sqlx_migrations`), BEFORE starting the Go
---   fc-server / fc-dev against that database for the first time.
+--   tracks its own history in `_schema_migrations`), if you want to seed the
+--   goose ledger explicitly rather than rely on the auto-bootstrap.
 --
 -- WHY
 --   The Go server applies its schema with pressly/goose, which records
 --   applied versions in `goose_db_version`. On a database goose has never
 --   seen, that ledger is empty, so goose would try to (re-)apply every
 --   migration 001..030 — including 019/022, which DROP and recreate the
---   messaging tables. (Go's own internal/migrate.bootstrap() auto-seeds the
---   ledger only when the legacy `_fc_migrations` tracker is present; it does
---   NOT recognise Rust's `_sqlx_migrations`, hence this manual script.)
+--   messaging tables. (The auto-bootstrap now prevents this; running this
+--   script first achieves the same thing explicitly.)
 --
 --   Running this first marks migrations 001..030 as already applied, so
 --   goose.Up runs none of them. Any NEW migration added later (031+) is
