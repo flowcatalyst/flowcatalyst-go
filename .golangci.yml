@@ -33,10 +33,12 @@ linters:
       excludes:
         - G104  # audit errors not checked — we use revive's error-return instead
         - G115  # int conversion overflow — handled by pgx
-
-issues:
-  exclude-dirs:
-    - internal/db/gen  # go-jet generated code
+  # golangci-lint v2 moved path exclusions out of the top-level `issues:` block
+  # (v1's `issues.exclude-dirs`) into `linters.exclusions.paths`. Using the old
+  # key fails `golangci-lint config verify`, which is what was reddening CI.
+  exclusions:
+    paths:
+      - internal/db/gen  # go-jet generated code
 
 formatters:
   enable:
