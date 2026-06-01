@@ -708,7 +708,11 @@ func (s *State) resetPassword(ctx context.Context, in *resetPasswordInput) (*sta
 	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
 	if _, err := operations.ResetPassword(ctx, s.Repo, s.UoW,
-		operations.ResetPasswordCommand{ID: in.ID, NewPassword: in.Body.NewPassword}, ec); err != nil {
+		operations.ResetPasswordCommand{
+			ID:                        in.ID,
+			NewPassword:               in.Body.NewPassword,
+			EnforcePasswordComplexity: in.Body.EnforcePasswordComplexity,
+		}, ec); err != nil {
 		return nil, err
 	}
 	return &statusMessageOutput{Body: apicommon.StatusChangeResponse{Message: "Password reset successfully"}}, nil

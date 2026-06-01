@@ -4782,6 +4782,9 @@
             "readOnly": true,
             "type": "string"
           },
+          "enforcePasswordComplexity": {
+            "type": "boolean"
+          },
           "newPassword": {
             "type": "string"
           }

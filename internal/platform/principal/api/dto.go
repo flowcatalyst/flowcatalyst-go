@@ -65,6 +65,16 @@ func (r UpdatePrincipalRequest) toCommand(id string) operations.UpdateCommand {
 // ResetPasswordRequest is the wire body for POST /api/principals/{id}/reset-password.
 type ResetPasswordRequest struct {
 	NewPassword string `json:"newPassword"`
+	// EnforcePasswordComplexity mirrors the Rust field of the same name (default
+	// true). When false, the caller (e.g. an SDK consumer that applies its own
+	// policy) opts out of the platform's password rules; Go relaxes the minimum
+	// length to match Rust's relaxed() policy. This field MUST exist on the DTO:
+	// huma generates schemas with additionalProperties:false, so without it the
+	// SDK's body ({newPassword, enforcePasswordComplexity}) is rejected with a
+	// "validation failed" 400. Go does not implement the upper/lower/digit/special
+	// complexity checks (consistent with create-user, which also only accepts the
+	// flag), so enforce=true keeps just the 8-char minimum.
+	EnforcePasswordComplexity *bool `json:"enforcePasswordComplexity,omitempty"`
 }
 
 // AssignPrincipalRolesRequest is the wire body for PUT /api/principals/{id}/roles.
