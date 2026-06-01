@@ -54,6 +54,9 @@ func (r *Repository) FindByID(ctx context.Context, id string) (*Principal, error
 	if err := r.hydrateRoles(ctx, p); err != nil {
 		return nil, err
 	}
+	if err := r.hydrateClientAccess(ctx, p); err != nil {
+		return nil, err
+	}
 	return p, nil
 }
 
@@ -82,7 +85,80 @@ func (r *Repository) FindByEmail(ctx context.Context, email string) (*Principal,
 	if err := r.hydrateRoles(ctx, p); err != nil {
 		return nil, err
 	}
+	if err := r.hydrateClientAccess(ctx, p); err != nil {
+		return nil, err
+	}
 	return p, nil
+}
+
+// hydrateClientAccess populates p.AssignedClients from iam_client_access_grants
+// and p.ClientIdentifierMap (client id → identifier) from tnt_clients for the
+// home + granted clients. 1:1 with Rust repository.rs::find_by_id.
+//
+// The identifier map is what makes the JWT `clients` claim carry "id:identifier"
+// pairs (e.g. "clt_abc:spar"). SDK consumers (the Laravel FlowCatalystUser) split
+// on ":" and match the identifier against their tenant code — without it every
+// login fails closed with "No access to this tenant". Inline SQL, matching the
+// hydrateRoles pattern, to avoid a sqlc regen for two trivial reads.
+func (r *Repository) hydrateClientAccess(ctx context.Context, p *Principal) error {
+	if r.pool == nil || p == nil {
+		return nil
+	}
+	// Granted clients (the access-grants junction).
+	rows, err := r.pool.Query(ctx,
+		`SELECT client_id FROM iam_client_access_grants WHERE principal_id = $1 ORDER BY client_id`, p.ID)
+	if err != nil {
+		return fmt.Errorf("principal client grants: %w", err)
+	}
+	granted := make([]string, 0)
+	for rows.Next() {
+		var cid string
+		if err := rows.Scan(&cid); err != nil {
+			rows.Close()
+			return fmt.Errorf("principal client grants scan: %w", err)
+		}
+		granted = append(granted, cid)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("principal client grants: %w", err)
+	}
+	p.AssignedClients = granted
+
+	// Identifier lookup for the home + granted client ids.
+	idSet := make(map[string]struct{}, len(granted)+1)
+	for _, c := range granted {
+		idSet[c] = struct{}{}
+	}
+	if p.ClientID != nil && *p.ClientID != "" {
+		idSet[*p.ClientID] = struct{}{}
+	}
+	if len(idSet) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(idSet))
+	for id := range idSet {
+		ids = append(ids, id)
+	}
+	idRows, err := r.pool.Query(ctx,
+		`SELECT id, identifier FROM tnt_clients WHERE id = ANY($1)`, ids)
+	if err != nil {
+		return fmt.Errorf("client identifiers: %w", err)
+	}
+	defer idRows.Close()
+	idMap := make(map[string]string, len(ids))
+	for idRows.Next() {
+		var id, identifier string
+		if err := idRows.Scan(&id, &identifier); err != nil {
+			return fmt.Errorf("client identifiers scan: %w", err)
+		}
+		idMap[id] = identifier
+	}
+	if err := idRows.Err(); err != nil {
+		return fmt.Errorf("client identifiers: %w", err)
+	}
+	p.ClientIdentifierMap = idMap
+	return nil
 }
 
 // hydrateRoles populates p.Roles from iam_principal_roles. Returns nil
