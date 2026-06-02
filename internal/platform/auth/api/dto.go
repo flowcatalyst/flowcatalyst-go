@@ -85,8 +85,8 @@ func (r UpdateOAuthClientRequest) toCommand(id string) operations.UpdateOAuthCli
 }
 
 // OAuthClientApplicationRef is the {id, name} shape the SPA's ApplicationRef
-// expects (oauth-clients.ts:5-8). The Go entity does not track applications,
-// so this is only ever emitted as an empty slice today.
+// expects (oauth-clients.ts:5-8). Built from the client's applicationIds by
+// State.fillApplicationRefs, which resolves each id to its application name.
 type OAuthClientApplicationRef struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
@@ -110,10 +110,10 @@ type OAuthClientResponse struct {
 	// PKCERequired has no entity field — always false. (defaulted)
 	PKCERequired   bool     `json:"pkceRequired"`
 	ApplicationIDs []string `json:"applicationIds"`
-	// Applications is the {id, name} display form of ApplicationIDs. Names
-	// require an application lookup this endpoint doesn't wire yet, so it's
-	// emitted empty; clients should use applicationIds. The SPA list page
-	// reads data.applications.length unconditionally, so it MUST be present.
+	// Applications is the {id, name} display form of ApplicationIDs,
+	// populated by State.fillApplicationRefs (a deleted application falls
+	// back to its id as the name). The SPA list page reads
+	// data.applications.length unconditionally, so it MUST be present.
 	Applications []OAuthClientApplicationRef `json:"applications"`
 	Active       bool                        `json:"active"`
 	// ServiceAccountPrincipalID maps from the entity's PrincipalID.
