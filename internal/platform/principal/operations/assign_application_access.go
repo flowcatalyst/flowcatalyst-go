@@ -67,5 +67,8 @@ func AssignApplicationAccess(
 		Added:          added,
 		Removed:        removed,
 	}
-	return commit.Save(ctx, uow, p, principals, event, cmd)
+	// AppAccessPersister rewrites the iam_principal_application_access
+	// junction from p.AccessibleApplicationIDs in the same tx as the event;
+	// the base principal Persist writes only the iam_principals row.
+	return commit.Save(ctx, uow, p, principal.AppAccessPersister{Repository: principals}, event, cmd)
 }

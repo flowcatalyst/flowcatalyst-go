@@ -80,7 +80,10 @@ func AssignRoles(
 		Added:    added,
 		Removed:  removed,
 	}
-	return commit.Save(ctx, uow, p, principals, event, cmd)
+	// RolesPersister rewrites the iam_principal_roles junction from p.Roles
+	// in the same tx as the event — the base principal Persist writes only
+	// the iam_principals row.
+	return commit.Save(ctx, uow, p, principal.RolesPersister{Repository: principals}, event, cmd)
 }
 
 func stringDifference(a, b []string) []string {

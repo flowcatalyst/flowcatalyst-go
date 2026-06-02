@@ -186,5 +186,8 @@ func SyncPrincipals(
 		Deactivated:     deactivated,
 		SyncedEmails:    syncedEmails,
 	}
-	return commit.Sync(ctx, uow, principals, saves, nil, rollup, cmd)
+	// RolesPersister rewrites iam_principal_roles for each synced user from
+	// its merged Roles slice — the base principal Persist writes only the
+	// iam_principals row, so without this the SDK's SDK_SYNC roles never land.
+	return commit.Sync(ctx, uow, principal.RolesPersister{Repository: principals}, saves, nil, rollup, cmd)
 }

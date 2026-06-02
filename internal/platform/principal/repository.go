@@ -17,12 +17,20 @@ import (
 
 // Repository is the Postgres-backed principal repo.
 //
-// Phase 3c scope: the principal row only. The junction tables
-// (iam_principal_roles, iam_client_access_grants,
-// iam_principal_application_access) are populated by deferred ops
-// (assign_roles, grant_client_access, …); Persist does NOT sync them.
-// Delete still cleans them to avoid orphans (only iam_principal_roles
-// has FK ON DELETE CASCADE; the other two don't).
+// Phase 3c scope: the base Persist writes the iam_principals row and
+// nothing else. The junction tables (iam_principal_roles,
+// iam_client_access_grants, iam_principal_application_access) are
+// deliberately left alone by Persist so unrelated writers (login
+// last-login bumps, create-user) can't clobber a junction they never
+// loaded. The ops that OWN a junction opt into writing it in the SAME
+// transaction as the domain event via a wrapper persister:
+//   - RolesPersister → iam_principal_roles
+//     (assign_roles, sync_idp_roles, sync_principals)
+//   - AppAccessPersister → iam_principal_application_access
+//     (assign_application_access)
+// Client-access grants are their own aggregate (ClientAccessGrantRepo).
+// Delete still cleans the non-cascade junctions to avoid orphans (only
+// iam_principal_roles has FK ON DELETE CASCADE; the other two don't).
 //
 // User-identity fields are stored as flat columns on iam_principals
 // (email, idp_type, external_idp_id, password_hash, last_login_at) —
@@ -57,6 +65,9 @@ func (r *Repository) FindByID(ctx context.Context, id string) (*Principal, error
 	if err := r.hydrateClientAccess(ctx, p); err != nil {
 		return nil, err
 	}
+	if err := r.hydrateAppAccess(ctx, p); err != nil {
+		return nil, err
+	}
 	return p, nil
 }
 
@@ -86,6 +97,9 @@ func (r *Repository) FindByEmail(ctx context.Context, email string) (*Principal,
 		return nil, err
 	}
 	if err := r.hydrateClientAccess(ctx, p); err != nil {
+		return nil, err
+	}
+	if err := r.hydrateAppAccess(ctx, p); err != nil {
 		return nil, err
 	}
 	return p, nil
@@ -191,6 +205,40 @@ func (r *Repository) hydrateRoles(ctx context.Context, p *Principal) error {
 	return rows.Err()
 }
 
+// hydrateAppAccess populates p.AccessibleApplicationIDs from
+// iam_principal_application_access. Mirrors hydrateRoles /
+// hydrateClientAccess: inline SQL, an empty slice when the user has no
+// grants. Without this the application-access list endpoint and the JWT
+// `applications` claim (see auth/provider.BuildClaims) always read empty,
+// even after assign_application_access has written the junction.
+func (r *Repository) hydrateAppAccess(ctx context.Context, p *Principal) error {
+	if r.pool == nil || p == nil {
+		return nil
+	}
+	rows, err := r.pool.Query(ctx,
+		`SELECT application_id
+		 FROM iam_principal_application_access
+		 WHERE principal_id = $1
+		 ORDER BY application_id`, p.ID)
+	if err != nil {
+		return fmt.Errorf("principal application access: %w", err)
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("principal application access scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("principal application access: %w", err)
+	}
+	p.AccessibleApplicationIDs = ids
+	return nil
+}
+
 // FindByServiceAccount loads the SERVICE-type principal linked to the
 // given service-account row. Used by callers that need to translate a
 // SA id into the principal id its FKs reference (e.g.
@@ -285,6 +333,83 @@ func (r *Repository) Persist(ctx context.Context, p *Principal, tx *usecasepgx.D
 		CreatedAt:        p.CreatedAt,
 		UpdatedAt:        now,
 	})
+}
+
+// replaceRolesTx rewrites iam_principal_roles for p from p.Roles within
+// tx (clear-then-insert, so the junction exactly mirrors the entity's
+// hydrated role set). Run by RolesPersister AFTER the base Persist, so
+// the iam_principals row exists for the FK on a freshly-created user.
+// ON CONFLICT makes a duplicate role name in the input a no-op rather
+// than a primary-key error.
+func (r *Repository) replaceRolesTx(ctx context.Context, p *Principal, tx *usecasepgx.DbTx) error {
+	q := tx.Inner()
+	if _, err := q.Exec(ctx,
+		`DELETE FROM iam_principal_roles WHERE principal_id = $1`, p.ID); err != nil {
+		return fmt.Errorf("clear principal roles: %w", err)
+	}
+	for _, ra := range p.Roles {
+		if _, err := q.Exec(ctx,
+			`INSERT INTO iam_principal_roles
+			     (principal_id, role_name, assignment_source, assigned_at)
+			 VALUES ($1, $2, $3, $4)
+			 ON CONFLICT (principal_id, role_name) DO UPDATE
+			     SET assignment_source = EXCLUDED.assignment_source,
+			         assigned_at       = EXCLUDED.assigned_at`,
+			p.ID, ra.Role, ra.AssignmentSource, ra.AssignedAt); err != nil {
+			return fmt.Errorf("insert principal role %q: %w", ra.Role, err)
+		}
+	}
+	return nil
+}
+
+// replaceAppAccessTx rewrites iam_principal_application_access for p from
+// p.AccessibleApplicationIDs within tx. The app-access analogue of
+// replaceRolesTx; see RolesPersister.
+func (r *Repository) replaceAppAccessTx(ctx context.Context, p *Principal, tx *usecasepgx.DbTx) error {
+	q := tx.Inner()
+	if _, err := q.Exec(ctx,
+		`DELETE FROM iam_principal_application_access WHERE principal_id = $1`, p.ID); err != nil {
+		return fmt.Errorf("clear principal application access: %w", err)
+	}
+	for _, appID := range p.AccessibleApplicationIDs {
+		if _, err := q.Exec(ctx,
+			`INSERT INTO iam_principal_application_access (principal_id, application_id)
+			 VALUES ($1, $2)
+			 ON CONFLICT (principal_id, application_id) DO NOTHING`,
+			p.ID, appID); err != nil {
+			return fmt.Errorf("insert principal application access %q: %w", appID, err)
+		}
+	}
+	return nil
+}
+
+// RolesPersister adapts the principal repo so commit.Save / commit.Sync
+// also rewrite iam_principal_roles from the principal's (hydrated) Roles
+// slice, in the same transaction as the domain event. The ops that own
+// the role set (assign_roles, sync_idp_roles, sync_principals) use it;
+// every other writer uses the base repo, whose Persist leaves the
+// junction untouched. Delete is promoted from the embedded *Repository.
+type RolesPersister struct{ *Repository }
+
+// Persist upserts the principal row, then replaces its role junction.
+func (rp RolesPersister) Persist(ctx context.Context, p *Principal, tx *usecasepgx.DbTx) error {
+	if err := rp.Repository.Persist(ctx, p, tx); err != nil {
+		return err
+	}
+	return rp.Repository.replaceRolesTx(ctx, p, tx)
+}
+
+// AppAccessPersister is the application-access analogue of RolesPersister:
+// Persist also rewrites iam_principal_application_access from
+// p.AccessibleApplicationIDs. Used by assign_application_access.
+type AppAccessPersister struct{ *Repository }
+
+// Persist upserts the principal row, then replaces its app-access junction.
+func (ap AppAccessPersister) Persist(ctx context.Context, p *Principal, tx *usecasepgx.DbTx) error {
+	if err := ap.Repository.Persist(ctx, p, tx); err != nil {
+		return err
+	}
+	return ap.Repository.replaceAppAccessTx(ctx, p, tx)
 }
 
 // UpdatePasswordHash overwrites only the password_hash for a principal. Used by

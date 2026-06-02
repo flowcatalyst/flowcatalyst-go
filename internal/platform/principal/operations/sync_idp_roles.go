@@ -119,5 +119,7 @@ func SyncIdpRoles(
 		Added:    added,
 		Removed:  removed,
 	}
-	return commit.Save(ctx, uow, p, principals, event, cmd)
+	// RolesPersister writes the merged role set to iam_principal_roles in
+	// the same tx as the event; the base Persist would skip the junction.
+	return commit.Save(ctx, uow, p, principal.RolesPersister{Repository: principals}, event, cmd)
 }
