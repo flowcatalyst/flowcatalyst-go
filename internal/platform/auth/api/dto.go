@@ -61,26 +61,40 @@ func (r CreateOAuthClientRequest) toCommand() operations.CreateOAuthClientComman
 }
 
 // UpdateOAuthClientRequest is the wire body for PUT /api/oauth-clients/{id}.
+// The SPA was built against the Rust API and sends `defaultScopes` (the same
+// wire name as OAuthClientResponse) and `pkceRequired`; both are accepted here
+// so the body validates (Go's schema is additionalProperties:false, unlike
+// Rust's lenient one, so unknown fields would otherwise 400).
 type UpdateOAuthClientRequest struct {
 	ClientName             *string  `json:"clientName,omitempty"`
 	RedirectURIs           []string `json:"redirectUris,omitempty"`
 	PostLogoutRedirectURIs []string `json:"postLogoutRedirectUris,omitempty"`
 	GrantTypes             []string `json:"grantTypes,omitempty"`
-	Scopes                 []string `json:"scopes,omitempty"`
-	AllowedOrigins         []string `json:"allowedOrigins,omitempty"`
-	ApplicationIDs         []string `json:"applicationIds,omitempty"`
+	// DefaultScopes is the SPA's wire name for the client's scopes (matches
+	// OAuthClientResponse.defaultScopes); `scopes` is the legacy array form.
+	DefaultScopes  []string `json:"defaultScopes,omitempty"`
+	Scopes         []string `json:"scopes,omitempty"`
+	AllowedOrigins []string `json:"allowedOrigins,omitempty"`
+	ApplicationIDs []string `json:"applicationIds,omitempty"`
+	// PKCERequired toggles whether /oauth/authorize demands a code_challenge.
+	PKCERequired *bool `json:"pkceRequired,omitempty"`
 }
 
 func (r UpdateOAuthClientRequest) toCommand(id string) operations.UpdateOAuthClientCommand {
+	scopes := r.Scopes
+	if len(r.DefaultScopes) > 0 {
+		scopes = r.DefaultScopes
+	}
 	return operations.UpdateOAuthClientCommand{
 		ID:                     id,
 		ClientName:             r.ClientName,
 		RedirectURIs:           r.RedirectURIs,
 		PostLogoutRedirectURIs: r.PostLogoutRedirectURIs,
 		GrantTypes:             r.GrantTypes,
-		Scopes:                 r.Scopes,
+		Scopes:                 scopes,
 		AllowedOrigins:         r.AllowedOrigins,
 		ApplicationIDs:         r.ApplicationIDs,
+		PKCERequired:           r.PKCERequired,
 	}
 }
 

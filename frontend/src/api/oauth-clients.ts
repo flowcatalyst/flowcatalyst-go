@@ -93,10 +93,15 @@ export const oauthClientsApi = {
 		});
 	},
 
-	update(id: string, data: UpdateOAuthClientRequest): Promise<void> {
+	update(
+		id: string,
+		data: UpdateOAuthClientRequest,
+		opts?: { suppressGlobalErrorToast?: boolean },
+	): Promise<void> {
 		return apiFetch(`/oauth-clients/${id}`, {
 			method: "PUT",
 			body: JSON.stringify(data),
+			...opts,
 		});
 	},
 

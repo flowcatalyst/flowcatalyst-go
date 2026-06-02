@@ -114,12 +114,28 @@ async function baseFetch<T>(
 		const error = await response
 			.json()
 			.catch(() => ({ message: "Request failed" }));
-		// Platform JSON: { error: "<CODE>", message: "<human text>" }
+		// Platform JSON: { error: "<CODE>", message: "<human text>",
+		//   details?: { errors?: [{ message, location, value }] } }
 		// Prefer the human message; fall back to the code, then a generic.
-		const message =
+		let message =
 			(typeof error.message === "string" && error.message) ||
 			(typeof error.error === "string" && error.error) ||
 			"Request failed";
+		// Surface per-field validation details so the caller sees WHICH field
+		// failed (e.g. "body.redirectUris: ...") rather than a bare
+		// "validation failed".
+		const fieldErrors = (error?.details?.errors ?? []) as Array<{
+			message?: string;
+			location?: string;
+		}>;
+		if (Array.isArray(fieldErrors) && fieldErrors.length > 0) {
+			const parts = fieldErrors
+				.map((fe) =>
+					fe.location ? `${fe.location}: ${fe.message ?? ""}`.trim() : fe.message,
+				)
+				.filter((p): p is string => !!p);
+			if (parts.length > 0) message = `${message} (${parts.join("; ")})`;
+		}
 		const code =
 			(typeof error.error === "string" && error.error) || error.code;
 

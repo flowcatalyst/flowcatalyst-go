@@ -90,6 +90,7 @@ type UpdateOAuthClientCommand struct {
 	Scopes                 []string `json:"scopes,omitempty"`
 	AllowedOrigins         []string `json:"allowedOrigins,omitempty"`
 	ApplicationIDs         []string `json:"applicationIds,omitempty"`
+	PKCERequired           *bool    `json:"pkceRequired,omitempty"`
 }
 
 func UpdateOAuthClient(
@@ -133,6 +134,9 @@ func UpdateOAuthClient(
 	}
 	if cmd.ApplicationIDs != nil {
 		c.ApplicationIDs = cmd.ApplicationIDs
+	}
+	if cmd.PKCERequired != nil {
+		c.PKCERequired = *cmd.PKCERequired
 	}
 
 	event := OAuthClientUpdated{

@@ -109,13 +109,46 @@ func newError(_ int, message string, errs ...error) huma.StatusError {
 			}
 		}
 	}
-	// Huma synthesises errors for its own validation failures (the
-	// message arg). Preserve them as VALIDATION-shaped envelopes so the
-	// shape on the wire stays consistent.
+	// Huma synthesises errors for its own request validation (bad/missing/
+	// unknown fields). Surface the per-field details under `details.errors`
+	// so the caller (and the SPA) can see WHICH field failed and why, instead
+	// of an opaque "validation failed". Without this every body-validation
+	// failure looks identical and is undebuggable from the response.
 	if message == "" {
 		message = "Internal server error"
 	}
-	return &ErrorModel{Code: "VALIDATION", Message: message, status: http.StatusBadRequest}
+	var details map[string]any
+	if fields := validationDetails(errs); len(fields) > 0 {
+		details = map[string]any{"errors": fields}
+	}
+	return &ErrorModel{Code: "VALIDATION", Message: message, Details: details, status: http.StatusBadRequest}
+}
+
+// validationDetails flattens huma's request-validation errors into a
+// JSON-friendly list of {message, location, value}. huma passes each field
+// failure as a *huma.ErrorDetail; anything else is rendered by its Error()
+// string.
+func validationDetails(errs []error) []map[string]any {
+	out := make([]map[string]any, 0, len(errs))
+	for _, e := range errs {
+		if e == nil {
+			continue
+		}
+		var d *huma.ErrorDetail
+		if errors.As(e, &d) {
+			m := map[string]any{"message": d.Message}
+			if d.Location != "" {
+				m["location"] = d.Location
+			}
+			if d.Value != nil {
+				m["value"] = d.Value
+			}
+			out = append(out, m)
+			continue
+		}
+		out = append(out, map[string]any{"message": e.Error()})
+	}
+	return out
 }
 
 // statusFor returns the HTTP status code for an envelope code.
