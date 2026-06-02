@@ -351,8 +351,9 @@ func WirePlatform(r chi.Router, pool *pgxpool.Pool, cfg EnvCfg) error {
 		})
 
 		authapi.Register(humaAPI, &authapi.State{
-			Repo: authRepo,
-			UoW:  uow,
+			Repo:         authRepo,
+			Applications: applicationRepo,
+			UoW:          uow,
 		})
 
 		// OAuth provider routes — all hand-rolled (authservice +

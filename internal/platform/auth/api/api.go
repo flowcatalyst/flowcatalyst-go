@@ -9,6 +9,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/application"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/operations"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/shared/apicommon"
@@ -21,7 +22,55 @@ import (
 // State bundles deps.
 type State struct {
 	Repo *auth.Repository
-	UoW  *usecasepgx.UnitOfWork
+	// Applications resolves oauth_client_application_ids to {id, name}
+	// display refs for OAuthClientResponse.Applications. Optional: nil
+	// leaves Applications empty (clients can still use applicationIds).
+	Applications *application.Repository
+	UoW          *usecasepgx.UnitOfWork
+}
+
+// fillApplicationRefs populates each response's Applications ({id,name})
+// from its ApplicationIDs, resolving names via the application repo in a
+// single deduped pass. Unresolved ids (e.g. a deleted application) fall
+// back to the id as the name so the SPA still renders a chip. No-op when
+// the application repo isn't wired.
+func (s *State) fillApplicationRefs(ctx context.Context, resps ...*OAuthClientResponse) error {
+	if s.Applications == nil {
+		return nil
+	}
+	idSet := map[string]struct{}{}
+	for _, r := range resps {
+		for _, id := range r.ApplicationIDs {
+			if id != "" {
+				idSet[id] = struct{}{}
+			}
+		}
+	}
+	if len(idSet) == 0 {
+		return nil
+	}
+	nameByID := make(map[string]string, len(idSet))
+	for id := range idSet {
+		app, err := s.Applications.FindByID(ctx, id)
+		if err != nil {
+			return usecase.Internal("REPO", "find_application failed", err)
+		}
+		if app != nil {
+			nameByID[id] = app.Name
+		}
+	}
+	for _, r := range resps {
+		refs := make([]OAuthClientApplicationRef, 0, len(r.ApplicationIDs))
+		for _, id := range r.ApplicationIDs {
+			name := nameByID[id]
+			if name == "" {
+				name = id
+			}
+			refs = append(refs, OAuthClientApplicationRef{ID: id, Name: name})
+		}
+		r.Applications = refs
+	}
+	return nil
 }
 
 const (
@@ -265,6 +314,13 @@ func (s *State) listOAuthClients(ctx context.Context, _ *emptyInput) (*listOAuth
 	for i := range rows {
 		out = append(out, oauthClientFromEntity(&rows[i]))
 	}
+	ptrs := make([]*OAuthClientResponse, len(out))
+	for i := range out {
+		ptrs[i] = &out[i]
+	}
+	if err := s.fillApplicationRefs(ctx, ptrs...); err != nil {
+		return nil, err
+	}
 	return &listOAuthClientsOutput{Body: OAuthClientListResponse{Clients: out}}, nil
 }
 
@@ -283,7 +339,11 @@ func (s *State) getOAuthClient(ctx context.Context, in *idInput) (*getOAuthClien
 	if c == nil {
 		return nil, httperror.NotFound("OAuthClient", in.ID)
 	}
-	return &getOAuthClientOutput{Body: oauthClientFromEntity(c)}, nil
+	resp := oauthClientFromEntity(c)
+	if err := s.fillApplicationRefs(ctx, &resp); err != nil {
+		return nil, err
+	}
+	return &getOAuthClientOutput{Body: resp}, nil
 }
 
 type clientIDPathInput struct {
@@ -303,7 +363,11 @@ func (s *State) getOAuthClientByClientID(ctx context.Context, in *clientIDPathIn
 	if c == nil {
 		return nil, httperror.NotFound("OAuthClient", in.ClientID)
 	}
-	return &getOAuthClientOutput{Body: oauthClientFromEntity(c)}, nil
+	resp := oauthClientFromEntity(c)
+	if err := s.fillApplicationRefs(ctx, &resp); err != nil {
+		return nil, err
+	}
+	return &getOAuthClientOutput{Body: resp}, nil
 }
 
 type createOAuthClientInput struct {
@@ -336,6 +400,9 @@ func (s *State) createOAuthClient(ctx context.Context, in *createOAuthClientInpu
 		return nil, usecase.Internal("REPO", "oauth client created but row not found", nil)
 	}
 	resp := CreateOAuthClientResponse{Client: oauthClientFromEntity(c)}
+	if err := s.fillApplicationRefs(ctx, &resp.Client); err != nil {
+		return nil, err
+	}
 	if plaintext, ok := operations.PopStashedSecret(event.OAuthClientID); ok {
 		resp.ClientSecret = plaintext
 	}
