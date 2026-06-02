@@ -327,6 +327,7 @@ func CanSyncEventTypes(a *AuthContext) error {
 		permEventTypeSync, permEventTypeManage,
 		permAppSvcEventTypeCreate, permAppSvcEventTypeUpdate, permAppSvcEventTypeDelete)
 }
+
 func CanWriteEventTypes(a *AuthContext) error {
 	return requireAny(a, permEventTypeCreate, permEventTypeUpdate, permEventTypeDelete)
 }
@@ -342,30 +343,38 @@ func CanWriteConnections(a *AuthContext) error {
 
 // ── Subscription permissions ─────────────────────────────────────────────
 func CanReadSubscriptions(a *AuthContext) error { return requirePermission(a, permSubscriptionView) }
+
 func CanCreateSubscriptions(a *AuthContext) error {
 	return requirePermission(a, permSubscriptionCreate)
 }
+
 func CanUpdateSubscriptions(a *AuthContext) error {
 	return requirePermission(a, permSubscriptionUpdate)
 }
+
 func CanDeleteSubscriptions(a *AuthContext) error {
 	return requirePermission(a, permSubscriptionDelete)
 }
+
 func CanWriteSubscriptions(a *AuthContext) error {
 	return requireAny(a, permSubscriptionCreate, permSubscriptionUpdate, permSubscriptionDelete)
 }
 
 // ── Dispatch pool permissions ────────────────────────────────────────────
 func CanReadDispatchPools(a *AuthContext) error { return requirePermission(a, permDispatchPoolView) }
+
 func CanCreateDispatchPools(a *AuthContext) error {
 	return requirePermission(a, permDispatchPoolCreate)
 }
+
 func CanUpdateDispatchPools(a *AuthContext) error {
 	return requirePermission(a, permDispatchPoolUpdate)
 }
+
 func CanDeleteDispatchPools(a *AuthContext) error {
 	return requirePermission(a, permDispatchPoolDelete)
 }
+
 func CanWriteDispatchPools(a *AuthContext) error {
 	return requireAny(a, permDispatchPoolCreate, permDispatchPoolUpdate, permDispatchPoolDelete)
 }
@@ -460,15 +469,19 @@ func CanSyncApplicationOpenAPI(a *AuthContext) error {
 func CanReadServiceAccounts(a *AuthContext) error {
 	return requirePermission(a, permServiceAccountView)
 }
+
 func CanCreateServiceAccounts(a *AuthContext) error {
 	return requirePermission(a, permServiceAccountCreate)
 }
+
 func CanUpdateServiceAccounts(a *AuthContext) error {
 	return requirePermission(a, permServiceAccountUpdate)
 }
+
 func CanDeleteServiceAccounts(a *AuthContext) error {
 	return requirePermission(a, permServiceAccountDelete)
 }
+
 func CanWriteServiceAccounts(a *AuthContext) error {
 	return requireAny(a, permServiceAccountCreate, permServiceAccountUpdate, permServiceAccountDelete)
 }
@@ -497,15 +510,19 @@ func CanWriteIdentityProviders(a *AuthContext) error { return RequireAnchor(a) }
 
 // ── Scheduled job permissions ────────────────────────────────────────────
 func CanReadScheduledJobs(a *AuthContext) error { return requirePermission(a, permScheduledJobView) }
+
 func CanCreateScheduledJobs(a *AuthContext) error {
 	return requirePermission(a, permScheduledJobCreate)
 }
+
 func CanUpdateScheduledJobs(a *AuthContext) error {
 	return requirePermission(a, permScheduledJobUpdate)
 }
+
 func CanDeleteScheduledJobs(a *AuthContext) error {
 	return requirePermission(a, permScheduledJobDelete)
 }
+
 func CanWriteScheduledJobs(a *AuthContext) error {
 	return requireAny(a, permScheduledJobCreate, permScheduledJobUpdate, permScheduledJobDelete)
 }

@@ -97,10 +97,10 @@ type OAuthClientApplicationRef struct {
 // are emitted as safe defaults (see oauthClientFromEntity) so the SPA — which
 // reads e.g. data.applications.length unconditionally — never crashes.
 type OAuthClientResponse struct {
-	ID           string   `json:"id"`
-	ClientID     string   `json:"clientId"`
-	ClientName   string   `json:"clientName"`
-	ClientType   string   `json:"clientType"`
+	ID                     string   `json:"id"`
+	ClientID               string   `json:"clientId"`
+	ClientName             string   `json:"clientName"`
+	ClientType             string   `json:"clientType"`
 	RedirectURIs           []string `json:"redirectUris"`
 	PostLogoutRedirectURIs []string `json:"postLogoutRedirectUris"`
 	AllowedOrigins         []string `json:"allowedOrigins"`

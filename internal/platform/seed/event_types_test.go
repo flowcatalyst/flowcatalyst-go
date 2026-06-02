@@ -81,11 +81,11 @@ func TestNoWebhookOrDeliveryEvents(t *testing.T) {
 
 func TestTitleCase(t *testing.T) {
 	cases := map[string]string{
-		"created":           "Created",
-		"roles-assigned":    "Roles Assigned",
-		"client-access":     "Client Access",
-		"":                  "",
-		"already Done":      "Already Done",
+		"created":        "Created",
+		"roles-assigned": "Roles Assigned",
+		"client-access":  "Client Access",
+		"":               "",
+		"already Done":   "Already Done",
 	}
 	for in, want := range cases {
 		if got := titleCase(in); got != want {

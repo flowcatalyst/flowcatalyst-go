@@ -173,11 +173,11 @@ func (c *OAuthClient) IntrospectToken(ctx context.Context, token string) (*Intro
 // UserInfoResponse is the body of /oauth/userinfo. Extra carries any
 // custom claims the platform adds.
 type UserInfoResponse struct {
-	Sub           string                 `json:"sub"`
-	Name          string                 `json:"name,omitempty"`
-	Email         string                 `json:"email,omitempty"`
-	EmailVerified *bool                  `json:"email_verified,omitempty"`
-	Extra         map[string]any         `json:"-"`
+	Sub           string         `json:"sub"`
+	Name          string         `json:"name,omitempty"`
+	Email         string         `json:"email,omitempty"`
+	EmailVerified *bool          `json:"email_verified,omitempty"`
+	Extra         map[string]any `json:"-"`
 }
 
 // UnmarshalJSON keeps standard fields typed and bucketing extras.

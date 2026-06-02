@@ -85,34 +85,34 @@ type ConfigEntry struct {
 
 // Subscription is the aggregate root.
 type Subscription struct {
-	ID               string             `json:"id"`
-	Code             string             `json:"code"`
-	ApplicationCode  *string            `json:"applicationCode,omitempty"`
-	Name             string             `json:"name"`
-	Description      *string            `json:"description,omitempty"`
-	ClientID         *string            `json:"clientId,omitempty"`
-	ClientIdentifier *string            `json:"clientIdentifier,omitempty"`
-	ClientScoped     bool               `json:"clientScoped"`
-	EventTypes       []EventTypeBinding `json:"eventTypes"`
-	ConnectionID     *string            `json:"connectionId,omitempty"`
-	Endpoint         string             `json:"endpoint"`
-	Queue            *string            `json:"queue,omitempty"`
-	CustomConfig     []ConfigEntry      `json:"customConfig"`
-	Source           Source             `json:"source"`
-	Status           Status             `json:"status"`
-	MaxAgeSeconds    int32              `json:"maxAgeSeconds"`
-	DispatchPoolID   *string            `json:"dispatchPoolId,omitempty"`
-	DispatchPoolCode *string            `json:"dispatchPoolCode,omitempty"`
-	DelaySeconds     int32              `json:"delaySeconds"`
-	Sequence         int32              `json:"sequence"`
+	ID               string              `json:"id"`
+	Code             string              `json:"code"`
+	ApplicationCode  *string             `json:"applicationCode,omitempty"`
+	Name             string              `json:"name"`
+	Description      *string             `json:"description,omitempty"`
+	ClientID         *string             `json:"clientId,omitempty"`
+	ClientIdentifier *string             `json:"clientIdentifier,omitempty"`
+	ClientScoped     bool                `json:"clientScoped"`
+	EventTypes       []EventTypeBinding  `json:"eventTypes"`
+	ConnectionID     *string             `json:"connectionId,omitempty"`
+	Endpoint         string              `json:"endpoint"`
+	Queue            *string             `json:"queue,omitempty"`
+	CustomConfig     []ConfigEntry       `json:"customConfig"`
+	Source           Source              `json:"source"`
+	Status           Status              `json:"status"`
+	MaxAgeSeconds    int32               `json:"maxAgeSeconds"`
+	DispatchPoolID   *string             `json:"dispatchPoolId,omitempty"`
+	DispatchPoolCode *string             `json:"dispatchPoolCode,omitempty"`
+	DelaySeconds     int32               `json:"delaySeconds"`
+	Sequence         int32               `json:"sequence"`
 	Mode             common.DispatchMode `json:"mode"`
-	TimeoutSeconds   int32              `json:"timeoutSeconds"`
-	MaxRetries       int32              `json:"maxRetries"`
-	ServiceAccountID *string            `json:"serviceAccountId,omitempty"`
-	DataOnly         bool               `json:"dataOnly"`
-	CreatedBy        *string            `json:"createdBy,omitempty"`
-	CreatedAt        time.Time          `json:"createdAt"`
-	UpdatedAt        time.Time          `json:"updatedAt"`
+	TimeoutSeconds   int32               `json:"timeoutSeconds"`
+	MaxRetries       int32               `json:"maxRetries"`
+	ServiceAccountID *string             `json:"serviceAccountId,omitempty"`
+	DataOnly         bool                `json:"dataOnly"`
+	CreatedBy        *string             `json:"createdBy,omitempty"`
+	CreatedAt        time.Time           `json:"createdAt"`
+	UpdatedAt        time.Time           `json:"updatedAt"`
 }
 
 // IDStr satisfies usecase.HasID.

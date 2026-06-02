@@ -30,6 +30,7 @@ type cascadeConsumer struct {
 func (c *cascadeConsumer) Poll(context.Context, uint32) ([]common.QueuedMessage, error) {
 	return nil, nil
 }
+
 func (c *cascadeConsumer) record(list *[]string, rh string) {
 	c.mu.Lock()
 	*list = append(*list, rh)
@@ -44,6 +45,7 @@ func (c *cascadeConsumer) Nack(_ context.Context, rh string, _ *uint32) error {
 	c.record(&c.nacked, rh)
 	return nil
 }
+
 func (c *cascadeConsumer) Defer(_ context.Context, rh string, _ *uint32) error {
 	c.record(&c.deferred, rh)
 	return nil

@@ -10,7 +10,7 @@ import (
 // fakeClock lets tests advance time deterministically.
 type fakeClock struct{ t time.Time }
 
-func (c *fakeClock) now() time.Time { return c.t }
+func (c *fakeClock) now() time.Time      { return c.t }
 func (c *fakeClock) add(d time.Duration) { c.t = c.t.Add(d) }
 
 func newTestGovernor(perMin, burst uint32, clk *fakeClock) *Governor {

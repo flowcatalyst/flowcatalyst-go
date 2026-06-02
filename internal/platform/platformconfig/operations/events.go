@@ -8,10 +8,10 @@ import (
 )
 
 const (
-	PropertySetType    = "platform:admin:platform-config:property-set"
-	AccessGrantedType  = "platform:admin:platform-config:access-granted"
-	AccessRevokedType  = "platform:admin:platform-config:access-revoked"
-	Source             = "platform:admin"
+	PropertySetType   = "platform:admin:platform-config:property-set"
+	AccessGrantedType = "platform:admin:platform-config:access-granted"
+	AccessRevokedType = "platform:admin:platform-config:access-revoked"
+	Source            = "platform:admin"
 )
 
 func subjectFor(id string) string { return "platform.platformconfig." + id }

@@ -53,33 +53,33 @@ type UpdateSubscriptionRequest struct {
 
 // SubscriptionResponse is the platform's subscription representation.
 type SubscriptionResponse struct {
-	ID                string             `json:"id"`
-	Code              string             `json:"code"`
-	Name              string             `json:"name"`
-	Description       string             `json:"description,omitempty"`
-	ClientID          string             `json:"clientId,omitempty"`
-	ClientIdentifier  string             `json:"clientIdentifier,omitempty"`
-	EventTypes        []EventTypeBinding `json:"eventTypes,omitempty"`
-	Endpoint          string             `json:"endpoint"`
-	ConnectionID      string             `json:"connectionId,omitempty"`
-	Queue             string             `json:"queue,omitempty"`
-	Source            string             `json:"source,omitempty"`
-	Status            string             `json:"status"`
-	MaxAgeSeconds     uint32             `json:"maxAgeSeconds,omitempty"`
-	DispatchPoolID    string             `json:"dispatchPoolId,omitempty"`
-	DispatchPoolCode  string             `json:"dispatchPoolCode,omitempty"`
-	DelaySeconds      uint32             `json:"delaySeconds,omitempty"`
-	Sequence          int32              `json:"sequence,omitempty"`
-	Mode              string             `json:"mode"`
-	TimeoutSeconds    uint32             `json:"timeoutSeconds,omitempty"`
-	MaxRetries        uint32             `json:"maxRetries,omitempty"`
-	ServiceAccountID  string             `json:"serviceAccountId,omitempty"`
-	DataOnly          bool               `json:"dataOnly,omitempty"`
-	ApplicationCode   string             `json:"applicationCode,omitempty"`
-	ClientScoped      bool               `json:"clientScoped,omitempty"`
-	CustomConfig      []ConfigEntry      `json:"customConfig,omitempty"`
-	CreatedAt         string             `json:"createdAt"`
-	UpdatedAt         string             `json:"updatedAt"`
+	ID               string             `json:"id"`
+	Code             string             `json:"code"`
+	Name             string             `json:"name"`
+	Description      string             `json:"description,omitempty"`
+	ClientID         string             `json:"clientId,omitempty"`
+	ClientIdentifier string             `json:"clientIdentifier,omitempty"`
+	EventTypes       []EventTypeBinding `json:"eventTypes,omitempty"`
+	Endpoint         string             `json:"endpoint"`
+	ConnectionID     string             `json:"connectionId,omitempty"`
+	Queue            string             `json:"queue,omitempty"`
+	Source           string             `json:"source,omitempty"`
+	Status           string             `json:"status"`
+	MaxAgeSeconds    uint32             `json:"maxAgeSeconds,omitempty"`
+	DispatchPoolID   string             `json:"dispatchPoolId,omitempty"`
+	DispatchPoolCode string             `json:"dispatchPoolCode,omitempty"`
+	DelaySeconds     uint32             `json:"delaySeconds,omitempty"`
+	Sequence         int32              `json:"sequence,omitempty"`
+	Mode             string             `json:"mode"`
+	TimeoutSeconds   uint32             `json:"timeoutSeconds,omitempty"`
+	MaxRetries       uint32             `json:"maxRetries,omitempty"`
+	ServiceAccountID string             `json:"serviceAccountId,omitempty"`
+	DataOnly         bool               `json:"dataOnly,omitempty"`
+	ApplicationCode  string             `json:"applicationCode,omitempty"`
+	ClientScoped     bool               `json:"clientScoped,omitempty"`
+	CustomConfig     []ConfigEntry      `json:"customConfig,omitempty"`
+	CreatedAt        string             `json:"createdAt"`
+	UpdatedAt        string             `json:"updatedAt"`
 }
 
 // SyncSubscriptionItem matches the platform's SyncSubscriptionInput.

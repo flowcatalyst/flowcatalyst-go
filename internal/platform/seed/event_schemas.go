@@ -305,18 +305,23 @@ func obj(props ...prop) json.RawMessage {
 func reqStr(name string) prop {
 	return prop{name: name, schema: map[string]any{"type": "string"}, required: true}
 }
+
 func optStr(name string) prop {
 	return prop{name: name, schema: map[string]any{"type": []string{"string", "null"}}}
 }
+
 func reqBool(name string) prop {
 	return prop{name: name, schema: map[string]any{"type": "boolean"}, required: true}
 }
+
 func reqU32(name string) prop {
 	return prop{name: name, schema: map[string]any{"type": "integer", "minimum": 0}, required: true}
 }
+
 func optU32(name string) prop {
 	return prop{name: name, schema: map[string]any{"type": []string{"integer", "null"}, "minimum": 0}}
 }
+
 func reqStrArray(name string) prop {
 	return prop{
 		name:     name,

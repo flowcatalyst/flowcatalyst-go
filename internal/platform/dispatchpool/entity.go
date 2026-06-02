@@ -31,10 +31,10 @@ func ParseStatus(s string) Status {
 
 // DispatchPool is the aggregate root.
 type DispatchPool struct {
-	ID               string    `json:"id"`
-	Code             string    `json:"code"`
-	Name             string    `json:"name"`
-	Description      *string   `json:"description,omitempty"`
+	ID          string  `json:"id"`
+	Code        string  `json:"code"`
+	Name        string  `json:"name"`
+	Description *string `json:"description,omitempty"`
 	// RateLimit is messages per minute. nil → no rate limit, concurrency-only.
 	RateLimit        *int32    `json:"rateLimit,omitempty"`
 	Concurrency      int32     `json:"concurrency"`

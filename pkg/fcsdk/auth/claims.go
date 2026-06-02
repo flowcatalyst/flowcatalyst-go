@@ -116,15 +116,17 @@ func NewAuthContext(claims AccessTokenClaims, token string) *AuthContext {
 	return &AuthContext{Claims: claims, Token: token}
 }
 
-func (a *AuthContext) PrincipalID() string                  { return a.Claims.Sub }
-func (a *AuthContext) Email() string                        { return a.Claims.Email }
-func (a *AuthContext) Name() string                         { return a.Claims.Name }
-func (a *AuthContext) IsAnchor() bool                       { return a.Claims.IsAnchor() }
-func (a *AuthContext) IsService() bool                      { return a.Claims.IsService() }
-func (a *AuthContext) HasClientAccess(clientID string) bool { return a.Claims.HasClientAccess(clientID) }
-func (a *AuthContext) HasRole(role string) bool             { return a.Claims.HasRole(role) }
-func (a *AuthContext) ClientIDs() []string                  { return a.Claims.Clients }
-func (a *AuthContext) Roles() []string                      { return a.Claims.Roles }
+func (a *AuthContext) PrincipalID() string { return a.Claims.Sub }
+func (a *AuthContext) Email() string       { return a.Claims.Email }
+func (a *AuthContext) Name() string        { return a.Claims.Name }
+func (a *AuthContext) IsAnchor() bool      { return a.Claims.IsAnchor() }
+func (a *AuthContext) IsService() bool     { return a.Claims.IsService() }
+func (a *AuthContext) HasClientAccess(clientID string) bool {
+	return a.Claims.HasClientAccess(clientID)
+}
+func (a *AuthContext) HasRole(role string) bool { return a.Claims.HasRole(role) }
+func (a *AuthContext) ClientIDs() []string      { return a.Claims.Clients }
+func (a *AuthContext) Roles() []string          { return a.Claims.Roles }
 
 // BearerToken returns the raw JWT for forwarding to downstream services.
 func (a *AuthContext) BearerToken() string { return a.Token }

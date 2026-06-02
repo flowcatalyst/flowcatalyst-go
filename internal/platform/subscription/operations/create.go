@@ -12,8 +12,10 @@ import (
 	"github.com/flowcatalyst/flowcatalyst-go/pkg/fcsdk/usecasepgx"
 )
 
-var codePattern = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
-var urlPattern = regexp.MustCompile(`^https?://.+`)
+var (
+	codePattern = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
+	urlPattern  = regexp.MustCompile(`^https?://.+`)
+)
 
 // CreateCommand is the input DTO.
 type CreateCommand struct {

@@ -10,13 +10,13 @@ package sync
 // SyncX flags are per-category skip switches. Empty categories on the
 // DefinitionSet are also implicitly skipped regardless of these flags.
 type Options struct {
-	RemoveUnlisted     bool
-	SyncRoles          bool
-	SyncEventTypes     bool
-	SyncSubscriptions  bool
-	SyncDispatchPools  bool
-	SyncPrincipals     bool
-	SyncProcesses      bool
+	RemoveUnlisted    bool
+	SyncRoles         bool
+	SyncEventTypes    bool
+	SyncSubscriptions bool
+	SyncDispatchPools bool
+	SyncPrincipals    bool
+	SyncProcesses     bool
 }
 
 // DefaultOptions enables every category, RemoveUnlisted=false.

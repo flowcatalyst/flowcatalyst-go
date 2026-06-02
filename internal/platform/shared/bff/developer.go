@@ -66,25 +66,25 @@ func RegisterDeveloper(r chi.Router, s *DeveloperState) {
 // ── Wire DTOs ────────────────────────────────────────────────────────────
 
 type bffDeveloperApplicationSummary struct {
-	ID               string     `json:"id"`
-	Code             string     `json:"code"`
-	Name             string     `json:"name"`
-	Description      *string    `json:"description,omitempty"`
-	IconURL          *string    `json:"iconUrl,omitempty"`
-	CurrentVersion   *string    `json:"currentVersion,omitempty"`
-	CurrentSpecID    *string    `json:"currentSpecId,omitempty"`
-	CurrentSyncedAt  *time.Time `json:"currentSyncedAt,omitempty"`
+	ID              string     `json:"id"`
+	Code            string     `json:"code"`
+	Name            string     `json:"name"`
+	Description     *string    `json:"description,omitempty"`
+	IconURL         *string    `json:"iconUrl,omitempty"`
+	CurrentVersion  *string    `json:"currentVersion,omitempty"`
+	CurrentSpecID   *string    `json:"currentSpecId,omitempty"`
+	CurrentSyncedAt *time.Time `json:"currentSyncedAt,omitempty"`
 }
 
 type bffOpenAPISpecResponse struct {
-	ID              string                  `json:"id"`
-	ApplicationID   string                  `json:"applicationId"`
-	Version         string                  `json:"version"`
-	Status          string                  `json:"status"`
-	Spec            json.RawMessage         `json:"spec"`
-	ChangeNotesText *string                 `json:"changeNotesText,omitempty"`
+	ID              string                    `json:"id"`
+	ApplicationID   string                    `json:"applicationId"`
+	Version         string                    `json:"version"`
+	Status          string                    `json:"status"`
+	Spec            json.RawMessage           `json:"spec"`
+	ChangeNotesText *string                   `json:"changeNotesText,omitempty"`
 	ChangeNotes     *openapispecs.ChangeNotes `json:"changeNotes,omitempty"`
-	SyncedAt        time.Time               `json:"syncedAt"`
+	SyncedAt        time.Time                 `json:"syncedAt"`
 }
 
 type bffOpenAPIVersionSummary struct {
@@ -97,15 +97,15 @@ type bffOpenAPIVersionSummary struct {
 }
 
 type bffDeveloperEventTypeSummary struct {
-	ID           string                                     `json:"id"`
-	Code         string                                     `json:"code"`
-	Name         string                                     `json:"name"`
-	Description  *string                                    `json:"description,omitempty"`
-	Status       string                                     `json:"status"`
-	Application  string                                     `json:"application"`
-	Subdomain    string                                     `json:"subdomain"`
-	Aggregate    string                                     `json:"aggregate"`
-	EventName    string                                     `json:"eventName"`
+	ID           string                                    `json:"id"`
+	Code         string                                    `json:"code"`
+	Name         string                                    `json:"name"`
+	Description  *string                                   `json:"description,omitempty"`
+	Status       string                                    `json:"status"`
+	Application  string                                    `json:"application"`
+	Subdomain    string                                    `json:"subdomain"`
+	Aggregate    string                                    `json:"aggregate"`
+	EventName    string                                    `json:"eventName"`
 	SpecVersions []bffDeveloperEventTypeSpecVersionSummary `json:"specVersions"`
 }
 

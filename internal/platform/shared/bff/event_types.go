@@ -469,11 +469,11 @@ type bffSyncPlatformRequest struct {
 // (created=updated=unchanged=0). The event-type-level counts ARE
 // correct.
 type bffSyncPlatformResponse struct {
-	Created uint32                  `json:"created"`
-	Updated uint32                  `json:"updated"`
-	Deleted uint32                  `json:"deleted"`
-	Total   uint32                  `json:"total"`
-	Schemas bffSyncPlatformSchemas  `json:"schemas"`
+	Created uint32                 `json:"created"`
+	Updated uint32                 `json:"updated"`
+	Deleted uint32                 `json:"deleted"`
+	Total   uint32                 `json:"total"`
+	Schemas bffSyncPlatformSchemas `json:"schemas"`
 }
 
 type bffSyncPlatformSchemas struct {

@@ -47,10 +47,10 @@ func (s *Service) Ceremonies() *CeremonyRepository { return s.ceremonies }
 // The library calls these methods during ceremony driving; we look up the
 // principal's persisted credentials lazily.
 type PrincipalUser struct {
-	PrincipalID  string
-	DisplayName  string
-	Username     string
-	Credentials  []webauthn.Credential
+	PrincipalID string
+	DisplayName string
+	Username    string
+	Credentials []webauthn.Credential
 }
 
 // WebAuthnID returns the user's RP-scoped ID (used as the WebAuthn user handle).

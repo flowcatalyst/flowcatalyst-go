@@ -12,12 +12,12 @@ type SyncOpenAPISpecRequest struct {
 
 // SyncOpenAPISpecResponse — result of an openapi sync.
 type SyncOpenAPISpecResponse struct {
-	ApplicationCode     string `json:"applicationCode"`
-	SpecID              string `json:"specId"`
-	Version             string `json:"version"`
-	Status              string `json:"status"`
+	ApplicationCode      string `json:"applicationCode"`
+	SpecID               string `json:"specId"`
+	Version              string `json:"version"`
+	Status               string `json:"status"`
 	ArchivedPriorVersion string `json:"archivedPriorVersion,omitempty"`
-	HasBreaking         bool   `json:"hasBreaking"`
+	HasBreaking          bool   `json:"hasBreaking"`
 	// Unchanged is true when the submitted spec is byte-identical to the
 	// currently published version — the platform short-circuits and
 	// returns the existing SpecID/Version.

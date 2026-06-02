@@ -188,9 +188,9 @@ func (u PlaceOrder) Execute(ctx context.Context, cmd PlaceOrderCommand, ec useca
 	}
 	event := OrderPlaced{
 		EventMetadata: newEventMetadata(ec,
-			"orders:sales:order:placed",          // event type
-			"orders:sales",                       // source
-			"orders.order."+order.ID,             // subject
+			"orders:sales:order:placed", // event type
+			"orders:sales",              // source
+			"orders.order."+order.ID,    // subject
 		),
 		CustomerID: order.CustomerID,
 		TotalCents: order.TotalCents,

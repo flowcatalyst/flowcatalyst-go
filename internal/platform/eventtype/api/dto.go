@@ -58,21 +58,21 @@ func (r AddSchemaRequest) toCommand(id string) operations.AddSchemaCommand {
 // with explicit JSON tags so the wire format is stable independent of
 // entity-field renames.
 type EventTypeResponse struct {
-	ID             string                  `json:"id"`
-	Code           string                  `json:"code"`
-	Name           string                  `json:"name"`
-	Application    string                  `json:"application"`
-	Subdomain      string                  `json:"subdomain"`
-	Aggregate      string                  `json:"aggregate"`
-	EventName      string                  `json:"eventName"`
-	Description    *string                 `json:"description,omitempty"`
-	Status         string                  `json:"status"`
-	Source         string                  `json:"source"`
-	ClientID       *string                 `json:"clientId,omitempty"`
-	CreatedBy      *string                 `json:"createdBy,omitempty"`
-	CreatedAt      httpcompat.Time         `json:"createdAt"`
-	UpdatedAt      httpcompat.Time         `json:"updatedAt"`
-	SpecVersions   []specVersionResponse   `json:"specVersions"`
+	ID           string                `json:"id"`
+	Code         string                `json:"code"`
+	Name         string                `json:"name"`
+	Application  string                `json:"application"`
+	Subdomain    string                `json:"subdomain"`
+	Aggregate    string                `json:"aggregate"`
+	EventName    string                `json:"eventName"`
+	Description  *string               `json:"description,omitempty"`
+	Status       string                `json:"status"`
+	Source       string                `json:"source"`
+	ClientID     *string               `json:"clientId,omitempty"`
+	CreatedBy    *string               `json:"createdBy,omitempty"`
+	CreatedAt    httpcompat.Time       `json:"createdAt"`
+	UpdatedAt    httpcompat.Time       `json:"updatedAt"`
+	SpecVersions []specVersionResponse `json:"specVersions"`
 }
 
 type specVersionResponse struct {

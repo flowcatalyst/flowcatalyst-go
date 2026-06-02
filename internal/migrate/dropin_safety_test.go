@@ -78,8 +78,10 @@ func TestDropInSafety(t *testing.T) {
 		migration_id VARCHAR(100) PRIMARY KEY,
 		applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		duration_ms INTEGER, checksum TEXT)`)
-	for _, v := range []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-		21, 22, 24, 25, 26, 27, 28, 29, 30} {
+	for _, v := range []int{
+		1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+		21, 22, 24, 25, 26, 27, 28, 29, 30,
+	} {
 		mustExec(`INSERT INTO _schema_migrations (migration_id) VALUES ($1)`,
 			fmt.Sprintf("%03d_rust_migration", v))
 	}

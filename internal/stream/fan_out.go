@@ -28,8 +28,8 @@ import (
 // stamps land in one transaction. FOR UPDATE SKIP LOCKED on the claim
 // makes it safe to run multiple stream nodes against the same DB.
 type FanOut struct {
-	pool             *pgxpool.Pool
-	subscriptionTTL  time.Duration
+	pool            *pgxpool.Pool
+	subscriptionTTL time.Duration
 
 	cacheMu       sync.Mutex
 	subs          []cachedSubscription
@@ -270,10 +270,10 @@ func loadActiveSubscriptions(ctx context.Context, pool *pgxpool.Pool) ([]cachedS
 	var order []string
 	for rows.Next() {
 		var (
-			id, target, mode                              string
-			clientID, dispatchPoolID, saID, etCode        *string
-			dataOnly                                      bool
-			maxRetries, timeoutSeconds, sequence          int32
+			id, target, mode                       string
+			clientID, dispatchPoolID, saID, etCode *string
+			dataOnly                               bool
+			maxRetries, timeoutSeconds, sequence   int32
 		)
 		if err := rows.Scan(&id, &clientID, &target, &mode, &dataOnly,
 			&dispatchPoolID, &saID, &maxRetries, &timeoutSeconds,

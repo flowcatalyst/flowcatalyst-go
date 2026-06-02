@@ -54,15 +54,15 @@ type EventTypeSchemaAdded struct {
 // Event type strings, source, subject builders. Matches the
 // platform_event_types.rs catalog byte-for-byte (drop-in parity).
 const (
-	EventTypeCreatedType       = "platform:admin:eventtype:created"
-	EventTypeUpdatedType       = "platform:admin:eventtype:updated"
-	EventTypeDeletedType       = "platform:admin:eventtype:deleted"
-	EventTypeArchivedType      = "platform:admin:eventtype:archived"
-	EventTypeSchemaAddedType   = "platform:admin:eventtype:schema-added"
+	EventTypeCreatedType          = "platform:admin:eventtype:created"
+	EventTypeUpdatedType          = "platform:admin:eventtype:updated"
+	EventTypeDeletedType          = "platform:admin:eventtype:deleted"
+	EventTypeArchivedType         = "platform:admin:eventtype:archived"
+	EventTypeSchemaAddedType      = "platform:admin:eventtype:schema-added"
 	EventTypeSchemaFinalisedType  = "platform:admin:eventtype:schema-finalised"
 	EventTypeSchemaDeprecatedType = "platform:admin:eventtype:schema-deprecated"
-	EventTypesSyncedType       = "platform:admin:eventtypes:synced"
-	EventTypeSourceConst       = "platform:admin"
+	EventTypesSyncedType          = "platform:admin:eventtypes:synced"
+	EventTypeSourceConst          = "platform:admin"
 )
 
 // EventTypesSynced is the rollup event emitted by SyncEventTypesUseCase.

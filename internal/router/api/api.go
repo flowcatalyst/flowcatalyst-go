@@ -137,18 +137,18 @@ type StreamHealthProvider interface {
 // Warnings/Health is optional; handlers gracefully degrade when a
 // provider is nil (return 503 or an empty payload, matching Rust).
 type State struct {
-	Warnings    *router.WarningService
-	Health      *router.HealthService
-	PoolStats   PoolStatsProvider
-	OpenCount   CircuitBreakerOpenCounter
-	Breakers    BreakerSnapshotProvider
-	InFlight    InFlightSnapshotProvider
-	BrokerStats BrokerStatsProvider
-	PoolUpdater PoolUpdater
-	Publisher   PublisherProvider
-	Leader      LeaderInfo
-	Reloader    ConfigReloader
-	Traffic     TrafficStatusProvider
+	Warnings     *router.WarningService
+	Health       *router.HealthService
+	PoolStats    PoolStatsProvider
+	OpenCount    CircuitBreakerOpenCounter
+	Breakers     BreakerSnapshotProvider
+	InFlight     InFlightSnapshotProvider
+	BrokerStats  BrokerStatsProvider
+	PoolUpdater  PoolUpdater
+	Publisher    PublisherProvider
+	Leader       LeaderInfo
+	Reloader     ConfigReloader
+	Traffic      TrafficStatusProvider
 	StreamHealth StreamHealthProvider
 
 	// Mocks is the counter set for /api/test/*. Created automatically by
@@ -327,12 +327,14 @@ func (a leaderAdapter) IsLeader() bool {
 	}
 	return a.s.IsLeader()
 }
+
 func (a leaderAdapter) StandbyEnabled() bool {
 	if a.s == nil {
 		return false
 	}
 	return a.s.Cfg.StandbyEnabled
 }
+
 func (a leaderAdapter) InstanceID() string {
 	if a.s == nil || a.s.Cfg.StandbyLockKey == "" {
 		return "default"

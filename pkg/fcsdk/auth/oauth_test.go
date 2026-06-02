@@ -54,7 +54,8 @@ func TestAuthorizeURLValuesAreUniquePerCall(t *testing.T) {
 func newOAuthMockServer(t *testing.T) (*httptest.Server, *struct {
 	tokenForm  url.Values
 	revokeForm url.Values
-}) {
+},
+) {
 	state := &struct {
 		tokenForm  url.Values
 		revokeForm url.Values

@@ -39,18 +39,18 @@ type AddSchemaVersionRequest struct {
 
 // EventTypeResponse is the platform's event-type representation.
 type EventTypeResponse struct {
-	ID            string                `json:"id"`
-	Code          string                `json:"code"`
-	Name          string                `json:"name"`
-	Description   string                `json:"description,omitempty"`
-	Status        string                `json:"status"`
-	Application   string                `json:"application,omitempty"`
-	Subdomain     string                `json:"subdomain,omitempty"`
-	Aggregate     string                `json:"aggregate,omitempty"`
-	EventName     string                `json:"event,omitempty"`
-	SpecVersions  []SpecVersionResponse `json:"specVersions,omitempty"`
-	CreatedAt     string                `json:"createdAt"`
-	UpdatedAt     string                `json:"updatedAt"`
+	ID           string                `json:"id"`
+	Code         string                `json:"code"`
+	Name         string                `json:"name"`
+	Description  string                `json:"description,omitempty"`
+	Status       string                `json:"status"`
+	Application  string                `json:"application,omitempty"`
+	Subdomain    string                `json:"subdomain,omitempty"`
+	Aggregate    string                `json:"aggregate,omitempty"`
+	EventName    string                `json:"event,omitempty"`
+	SpecVersions []SpecVersionResponse `json:"specVersions,omitempty"`
+	CreatedAt    string                `json:"createdAt"`
+	UpdatedAt    string                `json:"updatedAt"`
 }
 
 // SpecVersionResponse is one schema version on an event type.

@@ -17,30 +17,54 @@ import (
 // fc-mcp server). Optional args use `omitempty` (→ not required in the input
 // schema); required args (id, applicationCode) are plain strings.
 func (s *Server) registerTools(m *mcpsdk.Server) {
-	mcpsdk.AddTool(m, &mcpsdk.Tool{Name: "list_event_types",
-		Description: "List event types. Optionally filter by status, application, subdomain, aggregate, or clientId."}, s.listEventTypes)
-	mcpsdk.AddTool(m, &mcpsdk.Tool{Name: "get_event_type",
-		Description: "Get a single event type by id, including all schema spec versions."}, s.getEventType)
-	mcpsdk.AddTool(m, &mcpsdk.Tool{Name: "get_schema",
-		Description: "Extract the JSON Schema for an event type's spec version (defaults to CURRENT, falls back to FINALISING)."}, s.getSchema)
-	mcpsdk.AddTool(m, &mcpsdk.Tool{Name: "list_subscriptions",
-		Description: "List webhook subscriptions, scoped to the caller unless an admin clientId is given."}, s.listSubscriptions)
-	mcpsdk.AddTool(m, &mcpsdk.Tool{Name: "get_subscription",
-		Description: "Get a single subscription by id."}, s.getSubscription)
-	mcpsdk.AddTool(m, &mcpsdk.Tool{Name: "list_applications",
-		Description: "List registered applications. Defaults to active only; pass active=false to include inactive."}, s.listApplications)
-	mcpsdk.AddTool(m, &mcpsdk.Tool{Name: "list_roles",
-		Description: "List platform roles. Optionally filter by source (e.g. CODE, BOOTSTRAP, API, UI)."}, s.listRoles)
-	mcpsdk.AddTool(m, &mcpsdk.Tool{Name: "get_role",
-		Description: "Get a single role by id, including its assigned permissions."}, s.getRole)
-	mcpsdk.AddTool(m, &mcpsdk.Tool{Name: "get_openapi",
-		Description: "Fetch the CURRENT OpenAPI spec for an application (defaults to the 'platform' application)."}, s.getOpenAPI)
-	mcpsdk.AddTool(m, &mcpsdk.Tool{Name: "whoami",
-		Description: "Identify the caller: id, type (USER/SERVICE), scope, roles, and accessible clients/apps. Start here."}, s.whoami)
-	mcpsdk.AddTool(m, &mcpsdk.Tool{Name: "list_my_applications",
-		Description: "List the applications the caller has access to."}, s.listMyApplications)
-	mcpsdk.AddTool(m, &mcpsdk.Tool{Name: "get_application_capabilities",
-		Description: "Bundle an application's metadata, CURRENT OpenAPI spec, assignable roles, and CURRENT event types."}, s.getApplicationCapabilities)
+	mcpsdk.AddTool(m, &mcpsdk.Tool{
+		Name:        "list_event_types",
+		Description: "List event types. Optionally filter by status, application, subdomain, aggregate, or clientId.",
+	}, s.listEventTypes)
+	mcpsdk.AddTool(m, &mcpsdk.Tool{
+		Name:        "get_event_type",
+		Description: "Get a single event type by id, including all schema spec versions.",
+	}, s.getEventType)
+	mcpsdk.AddTool(m, &mcpsdk.Tool{
+		Name:        "get_schema",
+		Description: "Extract the JSON Schema for an event type's spec version (defaults to CURRENT, falls back to FINALISING).",
+	}, s.getSchema)
+	mcpsdk.AddTool(m, &mcpsdk.Tool{
+		Name:        "list_subscriptions",
+		Description: "List webhook subscriptions, scoped to the caller unless an admin clientId is given.",
+	}, s.listSubscriptions)
+	mcpsdk.AddTool(m, &mcpsdk.Tool{
+		Name:        "get_subscription",
+		Description: "Get a single subscription by id.",
+	}, s.getSubscription)
+	mcpsdk.AddTool(m, &mcpsdk.Tool{
+		Name:        "list_applications",
+		Description: "List registered applications. Defaults to active only; pass active=false to include inactive.",
+	}, s.listApplications)
+	mcpsdk.AddTool(m, &mcpsdk.Tool{
+		Name:        "list_roles",
+		Description: "List platform roles. Optionally filter by source (e.g. CODE, BOOTSTRAP, API, UI).",
+	}, s.listRoles)
+	mcpsdk.AddTool(m, &mcpsdk.Tool{
+		Name:        "get_role",
+		Description: "Get a single role by id, including its assigned permissions.",
+	}, s.getRole)
+	mcpsdk.AddTool(m, &mcpsdk.Tool{
+		Name:        "get_openapi",
+		Description: "Fetch the CURRENT OpenAPI spec for an application (defaults to the 'platform' application).",
+	}, s.getOpenAPI)
+	mcpsdk.AddTool(m, &mcpsdk.Tool{
+		Name:        "whoami",
+		Description: "Identify the caller: id, type (USER/SERVICE), scope, roles, and accessible clients/apps. Start here.",
+	}, s.whoami)
+	mcpsdk.AddTool(m, &mcpsdk.Tool{
+		Name:        "list_my_applications",
+		Description: "List the applications the caller has access to.",
+	}, s.listMyApplications)
+	mcpsdk.AddTool(m, &mcpsdk.Tool{
+		Name:        "get_application_capabilities",
+		Description: "Bundle an application's metadata, CURRENT OpenAPI spec, assignable roles, and CURRENT event types.",
+	}, s.getApplicationCapabilities)
 }
 
 // ─── argument structs ────────────────────────────────────────────────────

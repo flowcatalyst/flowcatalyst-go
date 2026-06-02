@@ -24,8 +24,8 @@ const IdpSyncSource = "IDP_SYNC"
 // EmailDomainMapping.AllowedRoleIDs filter. Empty slice = remove all
 // IDP-sourced roles (the user lost every group upstream).
 type SyncIdpRolesCommand struct {
-	UserID         string   `json:"userId"`
-	PlatformRoles  []string `json:"platformRoles"`
+	UserID        string   `json:"userId"`
+	PlatformRoles []string `json:"platformRoles"`
 }
 
 // SyncIdpRoles replaces the principal's IDP_SYNC-sourced role

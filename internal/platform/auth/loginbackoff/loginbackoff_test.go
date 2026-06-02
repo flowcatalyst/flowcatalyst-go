@@ -45,9 +45,11 @@ type fakeRepo struct {
 func (f *fakeRepo) LastSuccessAt(context.Context, string) (*time.Time, error) {
 	return f.lastSuccess, nil
 }
+
 func (f *fakeRepo) FailureStatsByIdentifierIPSince(context.Context, string, string, time.Time) (int, *time.Time, error) {
 	return f.pairCount, f.pairLastFail, nil
 }
+
 func (f *fakeRepo) FailureCountByIdentifierSince(context.Context, string, time.Time) (int, error) {
 	return f.globalCount, nil
 }

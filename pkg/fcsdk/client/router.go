@@ -15,19 +15,19 @@ import "context"
 // InPipeline=true means the router currently holds the message; the
 // caller should not re-enqueue. InPipeline=false → safe to resend.
 type InPipelineCheckResponse struct {
-	MessageID  string             `json:"messageId"`
-	InPipeline bool               `json:"inPipeline"`
-	Detail     *InPipelineDetail  `json:"detail,omitempty"`
+	MessageID  string            `json:"messageId"`
+	InPipeline bool              `json:"inPipeline"`
+	Detail     *InPipelineDetail `json:"detail,omitempty"`
 }
 
 // InPipelineDetail — populated when InPipeline=true.
 type InPipelineDetail struct {
-	MessageID            string `json:"messageId"`
-	BrokerMessageID      string `json:"brokerMessageId,omitempty"`
-	QueueID              string `json:"queueId"`
-	PoolCode             string `json:"poolCode"`
-	ElapsedTimeMs        uint64 `json:"elapsedTimeMs"`
-	AddedToInPipelineAt  string `json:"addedToInPipelineAt"`
+	MessageID           string `json:"messageId"`
+	BrokerMessageID     string `json:"brokerMessageId,omitempty"`
+	QueueID             string `json:"queueId"`
+	PoolCode            string `json:"poolCode"`
+	ElapsedTimeMs       uint64 `json:"elapsedTimeMs"`
+	AddedToInPipelineAt string `json:"addedToInPipelineAt"`
 }
 
 // InPipelineBatchRequest — body for /check-batch. Capped at 5000 ids.

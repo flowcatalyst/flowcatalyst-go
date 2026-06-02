@@ -58,13 +58,13 @@ func (h *Health) IsHealthy() bool { return h.IsRunning() }
 
 // Snapshot is the API-facing point-in-time view of one projection.
 type Snapshot struct {
-	Name            string       `json:"name"`
-	Status          StreamStatus `json:"status"`
-	Running         bool         `json:"running"`
-	Healthy         bool         `json:"healthy"`
-	BatchSequence   uint64       `json:"batchSequence"`
-	ErrorCount      uint64       `json:"errorCount"`
-	LastPollTimeMs  int64        `json:"lastPollTimeMs"`
+	Name           string       `json:"name"`
+	Status         StreamStatus `json:"status"`
+	Running        bool         `json:"running"`
+	Healthy        bool         `json:"healthy"`
+	BatchSequence  uint64       `json:"batchSequence"`
+	ErrorCount     uint64       `json:"errorCount"`
+	LastPollTimeMs int64        `json:"lastPollTimeMs"`
 }
 
 // Status returns the snapshot for this projection.
@@ -91,8 +91,8 @@ func (h *Health) Status() Snapshot {
 //
 // Mirrors crates/fc-stream/src/health.rs::StreamHealthService.
 type HealthService struct {
-	mu       sync.RWMutex
-	healths  []*Health
+	mu      sync.RWMutex
+	healths []*Health
 }
 
 // NewHealthService builds an empty service.

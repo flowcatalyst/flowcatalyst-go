@@ -57,11 +57,11 @@ func DefaultHealthServiceConfig() HealthServiceConfig {
 // every record() — amortised O(1) per record because eviction only
 // chews through the front prefix.
 type HealthService struct {
-	cfg             HealthServiceConfig
-	warningService  *WarningService
+	cfg            HealthServiceConfig
+	warningService *WarningService
 
-	mu              sync.RWMutex
-	poolCounters    map[string]*rollingCounter
+	mu               sync.RWMutex
+	poolCounters     map[string]*rollingCounter
 	consumerLastPoll map[string]time.Time
 	consumerRunning  map[string]bool
 }

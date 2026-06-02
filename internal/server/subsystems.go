@@ -441,6 +441,7 @@ func (NoopPublisher) Identifier() string { return "noop" }
 func (NoopPublisher) Publish(_ context.Context, _ common.Message) (string, error) {
 	return "noop", nil
 }
+
 func (NoopPublisher) PublishBatch(_ context.Context, msgs []common.Message) ([]string, error) {
 	out := make([]string, len(msgs))
 	for i := range msgs {

@@ -24,8 +24,8 @@ import (
 
 type oidcFixture struct {
 	server    *httptest.Server
-	signKey   jwk.Key   // private key for signing
-	pubKey    jwk.Key   // public key embedded in JWKS
+	signKey   jwk.Key // private key for signing
+	pubKey    jwk.Key // public key embedded in JWKS
 	issuerURL string
 }
 

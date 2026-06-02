@@ -36,6 +36,7 @@ func (s *stubBreakerSnapshotProvider) Reset(_ string) bool {
 	s.resetN++
 	return s.resetOK
 }
+
 func (s *stubBreakerSnapshotProvider) ResetAll() int {
 	s.resetAll = len(s.snap)
 	return s.resetAll
@@ -85,6 +86,7 @@ func (s *stubPublisher) Publish(_ context.Context, m common.Message) (string, er
 	}
 	return s.brokerID, nil
 }
+
 func (s *stubPublisher) PublishBatch(_ context.Context, msgs []common.Message) ([]string, error) {
 	if s.publishErr != nil {
 		return nil, s.publishErr

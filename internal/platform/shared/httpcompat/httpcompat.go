@@ -143,4 +143,3 @@ func statusFor(code string) int {
 	}
 	return http.StatusInternalServerError
 }
-

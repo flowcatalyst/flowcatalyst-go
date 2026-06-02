@@ -51,7 +51,7 @@ func main() {
 	)
 
 	runner := scheduledjobs.NewBuilder(c, lock.NewMemory()).
-		LockTTL(15 * time.Minute).
+		LockTTL(15*time.Minute).
 		OnError(func(err error, env *scheduledjobs.Envelope) {
 			// Hook fires on log/complete callback failures, lock
 			// failures, and handler panics. Treat as warnings; the

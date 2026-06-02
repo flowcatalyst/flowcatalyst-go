@@ -663,5 +663,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 // Compile-time guard: ensure the context import stays live as the
 // callback expands.
-var _ = context.Background
-var _ = errors.New
+var (
+	_ = context.Background
+	_ = errors.New
+)

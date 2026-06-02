@@ -8,10 +8,10 @@ import (
 )
 
 const (
-	PasskeyRegisteredType         = "platform:admin:passkey:registered"
-	PasskeyAuthenticatedType      = "platform:admin:passkey:authenticated"
-	PasskeyRevokedType            = "platform:admin:passkey:revoked"
-	Source                        = "platform:admin"
+	PasskeyRegisteredType    = "platform:admin:passkey:registered"
+	PasskeyAuthenticatedType = "platform:admin:passkey:authenticated"
+	PasskeyRevokedType       = "platform:admin:passkey:revoked"
+	Source                   = "platform:admin"
 )
 
 func subjectFor(id string) string { return "platform.passkey." + id }

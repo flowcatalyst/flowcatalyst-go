@@ -20,14 +20,14 @@ type MyClientsResponse struct {
 
 // MyApplication is one application accessible within a tenant.
 type MyApplication struct {
-	ID            string `json:"id"`
-	Code          string `json:"code"`
-	Name          string `json:"name"`
-	Description   string `json:"description,omitempty"`
-	IconURL       string `json:"iconUrl,omitempty"`
-	BaseURL       string `json:"baseUrl,omitempty"`
-	Website       string `json:"website,omitempty"`
-	LogoMimeType  string `json:"logoMimeType,omitempty"`
+	ID           string `json:"id"`
+	Code         string `json:"code"`
+	Name         string `json:"name"`
+	Description  string `json:"description,omitempty"`
+	IconURL      string `json:"iconUrl,omitempty"`
+	BaseURL      string `json:"baseUrl,omitempty"`
+	Website      string `json:"website,omitempty"`
+	LogoMimeType string `json:"logoMimeType,omitempty"`
 }
 
 // MyApplicationsResponse — GET /api/me/clients/{id}/applications.

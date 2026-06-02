@@ -21,7 +21,7 @@ import (
 // instance; on leader-loss, deregister so the ALB stops routing traffic
 // to a standing-by node.
 type TrafficConfig struct {
-	Enabled       bool
+	Enabled        bool
 	TargetGroupARN string
 	// InstanceIP is the IP the ALB target group will route to (typically
 	// the pod's pod-IP in EKS). If empty, the strategy is disabled with a
@@ -41,13 +41,13 @@ type TrafficConfig struct {
 // when Enabled is false every method becomes a successful no-op so
 // callers can wire it unconditionally.
 type TrafficStrategy struct {
-	cfg     TrafficConfig
-	client  *elasticloadbalancingv2.Client
+	cfg    TrafficConfig
+	client *elasticloadbalancingv2.Client
 
-	mu          sync.Mutex
-	registered  bool
-	lastChange  time.Time
-	lastError   string
+	mu         sync.Mutex
+	registered bool
+	lastChange time.Time
+	lastError  string
 }
 
 // NewTrafficStrategy builds a strategy. Returns an error only when the
@@ -231,5 +231,5 @@ func (s *TrafficStrategy) Status() TrafficStatus {
 // callers should just treat the no-op as success.
 var ErrTrafficDisabled = errors.New("traffic strategy disabled")
 
-func ptrStr(s string) *string  { return &s }
+func ptrStr(s string) *string { return &s }
 func ptrInt32(n int32) *int32 { return &n }

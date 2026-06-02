@@ -105,15 +105,15 @@ func buildEventPayload(event usecase.DomainEvent) ([]byte, error) {
 	}
 
 	payload := map[string]any{
-		"event_type":        event.EventType(),
-		"spec_version":      event.SpecVersion(),
-		"source":            event.Source(),
-		"subject":           event.Subject(),
-		"data":              dataAny,
-		"correlation_id":    event.CorrelationID(),
-		"causation_id":      event.CausationID(),
-		"deduplication_id":  event.EventType() + "-" + event.EventID(),
-		"message_group":     event.MessageGroup(),
+		"event_type":       event.EventType(),
+		"spec_version":     event.SpecVersion(),
+		"source":           event.Source(),
+		"subject":          event.Subject(),
+		"data":             dataAny,
+		"correlation_id":   event.CorrelationID(),
+		"causation_id":     event.CausationID(),
+		"deduplication_id": event.EventType() + "-" + event.EventID(),
+		"message_group":    event.MessageGroup(),
 		"context_data": []map[string]string{
 			{"key": "principalId", "value": event.PrincipalID()},
 			{"key": "aggregateType", "value": usecase.ExtractAggregateType(event.Subject())},

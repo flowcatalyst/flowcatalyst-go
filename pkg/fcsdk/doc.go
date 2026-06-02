@@ -36,19 +36,19 @@
 // Domain primitives (no I/O):
 //
 //   - usecase    — UseCase + Result + DomainEvent + ExecutionContext.
-//                  Result[E] is a sealed sum: Success requires a
-//                  sealed.Token only SDK packages can mint, so the only
-//                  path to Success outside the SDK is through
-//                  usecasepgx / usecasesql Commit*. Compile-time
-//                  enforced.
+//     Result[E] is a sealed sum: Success requires a
+//     sealed.Token only SDK packages can mint, so the only
+//     path to Success outside the SDK is through
+//     usecasepgx / usecasesql Commit*. Compile-time
+//     enforced.
 //   - tsid       — Time-Sorted IDs (Crockford Base32). 35 typed
-//                  EntityType prefixes plus GenerateWithPrefix for
-//                  app-specific IDs.
+//     EntityType prefixes plus GenerateWithPrefix for
+//     app-specific IDs.
 //
 // UnitOfWork drivers:
 //
 //   - usecasepgx — pgx-backed UoW. Entry points: Commit / CommitDelete /
-//                  CommitAll / EmitEvent / Run.
+//     CommitAll / EmitEvent / Run.
 //   - usecasesql — same shape, backed by database/sql.
 //
 // Sinks:
@@ -59,38 +59,38 @@
 // HTTP I/O:
 //
 //   - client     — *FlowCatalystClient + resource families
-//                  (event_types, subscriptions, dispatch_pools,
-//                  applications, processes, principals, roles,
-//                  permissions, audit_logs, clients, connections, me,
-//                  router, scheduled_jobs, openapi). Retry on transient
-//                  5xx, typed *APIError. Bearer token or TokenProvider
-//                  auth.
+//     (event_types, subscriptions, dispatch_pools,
+//     applications, processes, principals, roles,
+//     permissions, audit_logs, clients, connections, me,
+//     router, scheduled_jobs, openapi). Retry on transient
+//     5xx, typed *APIError. Bearer token or TokenProvider
+//     auth.
 //   - auth       — AccessTokenClaims + AuthContext; TokenValidator
-//                  (RS256 via JWKS auto-discovery through
-//                  lestrrat-go/jwx/v2); HmacTokenValidator (HS256);
-//                  OAuthClient (PKCE auth-code, refresh, revoke,
-//                  introspect, userinfo, RP-initiated logout);
-//                  ClientCredentialsProvider (satisfies
-//                  client.TokenProvider).
+//     (RS256 via JWKS auto-discovery through
+//     lestrrat-go/jwx/v2); HmacTokenValidator (HS256);
+//     OAuthClient (PKCE auth-code, refresh, revoke,
+//     introspect, userinfo, RP-initiated logout);
+//     ClientCredentialsProvider (satisfies
+//     client.TokenProvider).
 //   - webhook    — Two HMAC-SHA256 validators. Verifier matches this Go
-//                  platform's router (uppercase headers, ISO8601
-//                  timestamps); Validator matches the Rust SDK shape
-//                  (mixed-case headers, Unix-second timestamps).
+//     platform's router (uppercase headers, ISO8601
+//     timestamps); Validator matches the Rust SDK shape
+//     (mixed-case headers, Unix-second timestamps).
 //   - sync       — DefinitionSet + Synchronizer for declarative
-//                  reconciliation. One call per category.
+//     reconciliation. One call per category.
 //   - scheduledjobs — consumer-side Runner. Register HandlerFuncs by
-//                    job code; serialises via a lock.Provider, streams
-//                    logs back, reports completion.
+//     job code; serialises via a lock.Provider, streams
+//     logs back, reports completion.
 //
 // Infrastructure:
 //
 //   - cache      — pluggable byte-oriented Cache + Get/Set/GetOrSet
-//                  JSON helpers. MemoryCache ships here;
-//                  cache/postgrescache and cache/rediscache are opt-in
-//                  sub-packages.
+//     JSON helpers. MemoryCache ships here;
+//     cache/postgrescache and cache/rediscache are opt-in
+//     sub-packages.
 //   - lock       — distributed-lock Provider + Handle. Memory ships
-//                  here; lock/postgreslock and lock/redislock are
-//                  opt-in sub-packages.
+//     here; lock/postgreslock and lock/redislock are
+//     opt-in sub-packages.
 //
 // Internal:
 //

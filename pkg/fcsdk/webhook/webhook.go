@@ -22,7 +22,7 @@ const TimestampHeader = "X-FLOWCATALYST-TIMESTAMP"
 
 // Verifier validates inbound webhook signatures.
 type Verifier struct {
-	secret      []byte
+	secret []byte
 	// MaxClockSkew is how far the inbound timestamp may differ from now.
 	// Defaults to 5 minutes to allow for clock drift between sender and receiver.
 	MaxClockSkew time.Duration

@@ -281,8 +281,10 @@ func Register(api huma.API, s *State) {
 
 // ── shared types ──────────────────────────────────────────────────────────
 
-type emptyInput struct{}
-type emptyOutput struct{}
+type (
+	emptyInput  struct{}
+	emptyOutput struct{}
+)
 
 type idInput struct {
 	ID string `path:"id"`

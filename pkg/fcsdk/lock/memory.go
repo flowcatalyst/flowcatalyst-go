@@ -31,9 +31,9 @@ func (noopHandle) Release(_ context.Context) error { return nil }
 // given key inside this process. Does NOT survive multiple replicas —
 // use postgreslock or redislock for that.
 type Memory struct {
-	mu  sync.Mutex
+	mu   sync.Mutex
 	held map[string]time.Time
-	now func() time.Time
+	now  func() time.Time
 }
 
 // NewMemory builds an empty Memory provider.

@@ -4,9 +4,9 @@ package api
 import (
 	"encoding/json"
 
-	wa "github.com/flowcatalyst/flowcatalyst-go/internal/platform/webauthn"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/shared/httpcompat"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/shared/jsontime"
+	wa "github.com/flowcatalyst/flowcatalyst-go/internal/platform/webauthn"
 )
 
 // RegisterBeginRequest is the wire body for POST /auth/webauthn/register/begin.

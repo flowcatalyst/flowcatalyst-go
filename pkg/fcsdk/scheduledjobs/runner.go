@@ -410,4 +410,3 @@ func sanitiseResult(v json.RawMessage) json.RawMessage {
 	preview := string(v[:MaxResultBytes])
 	return json.RawMessage(fmt.Sprintf(`{"truncated":true,"preview":%q}`, preview))
 }
-

@@ -94,7 +94,7 @@ func publisherFactory(ctx context.Context, cfg common.QueueConfig) (queue.Publis
 
 // Queue is a NATS JetStream-backed queue (consumer + publisher).
 type Queue struct {
-	cfg      Config
+	cfg        Config
 	identifier string
 
 	nc       *natsgo.Conn
@@ -456,4 +456,3 @@ func subjectFor(filter string, m common.Message) string {
 	}
 	return filter
 }
-

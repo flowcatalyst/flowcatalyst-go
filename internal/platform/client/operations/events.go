@@ -8,13 +8,13 @@ import (
 )
 
 const (
-	ClientCreatedType    = "platform:admin:client:created"
-	ClientUpdatedType    = "platform:admin:client:updated"
-	ClientActivatedType  = "platform:admin:client:activated"
-	ClientSuspendedType  = "platform:admin:client:suspended"
-	ClientNoteAddedType  = "platform:admin:client:note-added"
-	ClientDeletedType    = "platform:admin:client:deleted"
-	Source               = "platform:admin"
+	ClientCreatedType   = "platform:admin:client:created"
+	ClientUpdatedType   = "platform:admin:client:updated"
+	ClientActivatedType = "platform:admin:client:activated"
+	ClientSuspendedType = "platform:admin:client:suspended"
+	ClientNoteAddedType = "platform:admin:client:note-added"
+	ClientDeletedType   = "platform:admin:client:deleted"
+	Source              = "platform:admin"
 )
 
 func subjectFor(id string) string { return "platform.client." + id }

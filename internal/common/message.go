@@ -48,15 +48,15 @@ func (d DispatchMode) RequiresOrdering() bool {
 // Message is the core message structure that flows through the system.
 // Compatible with Java's MessagePointer.
 type Message struct {
-	ID               string        `json:"id"`
-	PoolCode         string        `json:"poolCode,omitempty"`
-	AuthToken        *string       `json:"authToken,omitempty"`
-	SigningSecret    *string       `json:"signingSecret,omitempty"`
-	MediationType    MediationType `json:"mediationType"`
-	MediationTarget  string        `json:"mediationTarget"`
-	MessageGroupID   *string       `json:"messageGroupId,omitempty"`
-	HighPriority     bool          `json:"highPriority,omitempty"`
-	DispatchMode     DispatchMode  `json:"dispatchMode,omitempty"`
+	ID              string        `json:"id"`
+	PoolCode        string        `json:"poolCode,omitempty"`
+	AuthToken       *string       `json:"authToken,omitempty"`
+	SigningSecret   *string       `json:"signingSecret,omitempty"`
+	MediationType   MediationType `json:"mediationType"`
+	MediationTarget string        `json:"mediationTarget"`
+	MessageGroupID  *string       `json:"messageGroupId,omitempty"`
+	HighPriority    bool          `json:"highPriority,omitempty"`
+	DispatchMode    DispatchMode  `json:"dispatchMode,omitempty"`
 }
 
 // QueuedMessage is a Message received from a queue with broker tracking.

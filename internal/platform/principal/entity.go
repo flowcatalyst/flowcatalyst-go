@@ -120,22 +120,22 @@ type ExternalIdentity struct {
 
 // Principal is the aggregate root. Unified for users and service accounts.
 type Principal struct {
-	ID                       string                         `json:"id"`
-	Type                     Type                           `json:"type"`
-	Scope                    UserScope                      `json:"scope"`
-	ClientID                 *string                        `json:"clientId,omitempty"`
-	ApplicationID            *string                        `json:"applicationId,omitempty"`
-	Name                     string                         `json:"name"`
-	Active                   bool                           `json:"active"`
-	UserIdentity             *UserIdentity                  `json:"userIdentity,omitempty"`
-	ServiceAccountID         *string                        `json:"serviceAccountId,omitempty"`
+	ID                       string                          `json:"id"`
+	Type                     Type                            `json:"type"`
+	Scope                    UserScope                       `json:"scope"`
+	ClientID                 *string                         `json:"clientId,omitempty"`
+	ApplicationID            *string                         `json:"applicationId,omitempty"`
+	Name                     string                          `json:"name"`
+	Active                   bool                            `json:"active"`
+	UserIdentity             *UserIdentity                   `json:"userIdentity,omitempty"`
+	ServiceAccountID         *string                         `json:"serviceAccountId,omitempty"`
 	Roles                    []serviceaccount.RoleAssignment `json:"roles"`
-	AssignedClients          []string                       `json:"assignedClients"`
-	ClientIdentifierMap      map[string]string              `json:"clientIdentifierMap,omitempty"`
-	AccessibleApplicationIDs []string                       `json:"accessibleApplicationIds"`
-	ExternalIdentity         *ExternalIdentity              `json:"externalIdentity,omitempty"`
-	CreatedAt                time.Time                      `json:"createdAt"`
-	UpdatedAt                time.Time                      `json:"updatedAt"`
+	AssignedClients          []string                        `json:"assignedClients"`
+	ClientIdentifierMap      map[string]string               `json:"clientIdentifierMap,omitempty"`
+	AccessibleApplicationIDs []string                        `json:"accessibleApplicationIds"`
+	ExternalIdentity         *ExternalIdentity               `json:"externalIdentity,omitempty"`
+	CreatedAt                time.Time                       `json:"createdAt"`
+	UpdatedAt                time.Time                       `json:"updatedAt"`
 }
 
 // IDStr satisfies usecase.HasID.

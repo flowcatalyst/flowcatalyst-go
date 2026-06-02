@@ -6,7 +6,7 @@
 //
 //   - Static bearer token (set via FC_TOKEN env). Fine for scripts.
 //   - OAuth2 client_credentials (set FC_CLIENT_ID + FC_CLIENT_SECRET
-//     + FC_ISSUER). The TokenProvider caches tokens until 60s before
+//   - FC_ISSUER). The TokenProvider caches tokens until 60s before
 //     expiry and refreshes on demand — wire this for long-running
 //     services.
 //

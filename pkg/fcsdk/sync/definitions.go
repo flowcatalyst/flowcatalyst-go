@@ -29,10 +29,13 @@ type RoleDefinition struct {
 // MakeRole starts a RoleDefinition with the given short name.
 func MakeRole(name string) RoleDefinition { return RoleDefinition{Name: name} }
 
-func (r RoleDefinition) WithDisplayName(name string) RoleDefinition     { r.DisplayName = name; return r }
-func (r RoleDefinition) WithDescription(d string) RoleDefinition        { r.Description = d; return r }
-func (r RoleDefinition) WithPermissions(perms ...string) RoleDefinition { r.Permissions = append(r.Permissions, perms...); return r }
-func (r RoleDefinition) ClientManagedEnabled() RoleDefinition           { r.ClientManaged = true; return r }
+func (r RoleDefinition) WithDisplayName(name string) RoleDefinition { r.DisplayName = name; return r }
+func (r RoleDefinition) WithDescription(d string) RoleDefinition    { r.Description = d; return r }
+func (r RoleDefinition) WithPermissions(perms ...string) RoleDefinition {
+	r.Permissions = append(r.Permissions, perms...)
+	return r
+}
+func (r RoleDefinition) ClientManagedEnabled() RoleDefinition { r.ClientManaged = true; return r }
 
 // EventTypeDefinition declares an event type.
 // Code must be the full four-segment identifier
@@ -46,7 +49,10 @@ type EventTypeDefinition struct {
 func MakeEventType(code, name string) EventTypeDefinition {
 	return EventTypeDefinition{Code: code, Name: name}
 }
-func (e EventTypeDefinition) WithDescription(d string) EventTypeDefinition { e.Description = d; return e }
+func (e EventTypeDefinition) WithDescription(d string) EventTypeDefinition {
+	e.Description = d
+	return e
+}
 
 // SubscriptionBinding pairs an event type pattern with an optional filter.
 type SubscriptionBinding struct {
@@ -72,13 +78,28 @@ type SubscriptionDefinition struct {
 func MakeSubscription(code, name, target string) SubscriptionDefinition {
 	return SubscriptionDefinition{Code: code, Name: name, Target: target}
 }
-func (s SubscriptionDefinition) WithDescription(d string) SubscriptionDefinition         { s.Description = d; return s }
-func (s SubscriptionDefinition) WithConnection(id string) SubscriptionDefinition         { s.ConnectionID = id; return s }
-func (s SubscriptionDefinition) WithDispatchPool(code string) SubscriptionDefinition     { s.DispatchPoolCode = code; return s }
-func (s SubscriptionDefinition) WithMode(m string) SubscriptionDefinition                { s.Mode = m; return s }
-func (s SubscriptionDefinition) WithMaxRetries(n uint32) SubscriptionDefinition          { s.MaxRetries = &n; return s }
-func (s SubscriptionDefinition) WithTimeout(secs uint32) SubscriptionDefinition          { s.TimeoutSeconds = &secs; return s }
-func (s SubscriptionDefinition) DataOnlyEnabled() SubscriptionDefinition                 { s.DataOnly = true; return s }
+func (s SubscriptionDefinition) WithDescription(d string) SubscriptionDefinition {
+	s.Description = d
+	return s
+}
+func (s SubscriptionDefinition) WithConnection(id string) SubscriptionDefinition {
+	s.ConnectionID = id
+	return s
+}
+func (s SubscriptionDefinition) WithDispatchPool(code string) SubscriptionDefinition {
+	s.DispatchPoolCode = code
+	return s
+}
+func (s SubscriptionDefinition) WithMode(m string) SubscriptionDefinition { s.Mode = m; return s }
+func (s SubscriptionDefinition) WithMaxRetries(n uint32) SubscriptionDefinition {
+	s.MaxRetries = &n
+	return s
+}
+func (s SubscriptionDefinition) WithTimeout(secs uint32) SubscriptionDefinition {
+	s.TimeoutSeconds = &secs
+	return s
+}
+func (s SubscriptionDefinition) DataOnlyEnabled() SubscriptionDefinition { s.DataOnly = true; return s }
 func (s SubscriptionDefinition) Bind(eventTypeCode, filter string) SubscriptionDefinition {
 	s.EventTypes = append(s.EventTypes, SubscriptionBinding{EventTypeCode: eventTypeCode, Filter: filter})
 	return s
@@ -95,8 +116,14 @@ type DispatchPoolDefinition struct {
 func MakeDispatchPool(code, name string) DispatchPoolDefinition {
 	return DispatchPoolDefinition{Code: code, Name: name}
 }
-func (d DispatchPoolDefinition) WithDescription(s string) DispatchPoolDefinition  { d.Description = s; return d }
-func (d DispatchPoolDefinition) WithConcurrency(c uint32) DispatchPoolDefinition  { d.Concurrency = c; return d }
+func (d DispatchPoolDefinition) WithDescription(s string) DispatchPoolDefinition {
+	d.Description = s
+	return d
+}
+func (d DispatchPoolDefinition) WithConcurrency(c uint32) DispatchPoolDefinition {
+	d.Concurrency = c
+	return d
+}
 
 // PrincipalDefinition declares a user principal. Matched by Email on
 // sync. Active defaults to true (set Inactive() to override).
@@ -129,6 +156,11 @@ type ProcessDefinition struct {
 	Steps       json.RawMessage
 }
 
-func MakeProcess(code, name string) ProcessDefinition { return ProcessDefinition{Code: code, Name: name} }
+func MakeProcess(code, name string) ProcessDefinition {
+	return ProcessDefinition{Code: code, Name: name}
+}
 func (p ProcessDefinition) WithDescription(s string) ProcessDefinition { p.Description = s; return p }
-func (p ProcessDefinition) WithSteps(steps json.RawMessage) ProcessDefinition { p.Steps = steps; return p }
+func (p ProcessDefinition) WithSteps(steps json.RawMessage) ProcessDefinition {
+	p.Steps = steps
+	return p
+}

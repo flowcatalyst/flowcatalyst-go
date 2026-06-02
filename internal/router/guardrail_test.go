@@ -42,10 +42,12 @@ func (c *grConsumer) Nack(ctx context.Context, receipt string, delay *uint32) er
 	c.lastNackDelay.Store(delay)
 	return nil
 }
+
 func (c *grConsumer) Defer(ctx context.Context, receipt string, delay *uint32) error {
 	c.defers.Add(1)
 	return nil
 }
+
 func (c *grConsumer) ExtendVisibility(ctx context.Context, receipt string, sec uint32) error {
 	return nil
 }

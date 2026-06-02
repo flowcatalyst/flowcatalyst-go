@@ -81,15 +81,15 @@ type ApplicationRoleResponse struct {
 
 // ClientConfigResponse — one entry in GET /api/applications/{id}/clients.
 type ClientConfigResponse struct {
-	ID                string          `json:"id"`
-	ApplicationID     string          `json:"applicationId"`
-	ClientID          string          `json:"clientId"`
-	ClientName        string          `json:"clientName,omitempty"`
-	ClientIdentifier  string          `json:"clientIdentifier,omitempty"`
-	Enabled           bool            `json:"enabled,omitempty"`
-	BaseURLOverride   string          `json:"baseUrlOverride,omitempty"`
-	EffectiveBaseURL  string          `json:"effectiveBaseUrl,omitempty"`
-	Config            json.RawMessage `json:"config,omitempty"`
+	ID               string          `json:"id"`
+	ApplicationID    string          `json:"applicationId"`
+	ClientID         string          `json:"clientId"`
+	ClientName       string          `json:"clientName,omitempty"`
+	ClientIdentifier string          `json:"clientIdentifier,omitempty"`
+	Enabled          bool            `json:"enabled,omitempty"`
+	BaseURLOverride  string          `json:"baseUrlOverride,omitempty"`
+	EffectiveBaseURL string          `json:"effectiveBaseUrl,omitempty"`
+	Config           json.RawMessage `json:"config,omitempty"`
 }
 
 // ClientConfigsResponse — GET /api/applications/{id}/clients.

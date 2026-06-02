@@ -42,7 +42,7 @@ type Permission struct {
 type Role struct {
 	ID              string    `json:"id"`
 	ApplicationID   *string   `json:"applicationId,omitempty"`
-	Name            string    `json:"name"`        // e.g. "platform:admin"
+	Name            string    `json:"name"` // e.g. "platform:admin"
 	DisplayName     string    `json:"displayName"`
 	Description     *string   `json:"description,omitempty"`
 	ApplicationCode string    `json:"applicationCode"`

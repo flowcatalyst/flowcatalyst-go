@@ -127,22 +127,22 @@ type ScheduledJobResponse struct {
 
 // ScheduledJobInstanceResponse — one firing of a scheduled job.
 type ScheduledJobInstanceResponse struct {
-	ID                string          `json:"id"`
-	ScheduledJobID    string          `json:"scheduledJobId"`
-	ClientID          string          `json:"clientId,omitempty"`
-	JobCode           string          `json:"jobCode"`
-	TriggerKind       string          `json:"triggerKind"`
-	ScheduledFor      string          `json:"scheduledFor,omitempty"`
-	FiredAt           string          `json:"firedAt"`
-	DeliveredAt       string          `json:"deliveredAt,omitempty"`
-	CompletedAt       string          `json:"completedAt,omitempty"`
-	Status            string          `json:"status"`
-	DeliveryAttempts  int32           `json:"deliveryAttempts"`
-	DeliveryError     string          `json:"deliveryError,omitempty"`
-	CompletionStatus  string          `json:"completionStatus,omitempty"`
-	CompletionResult  json.RawMessage `json:"completionResult,omitempty"`
-	CorrelationID     string          `json:"correlationId,omitempty"`
-	CreatedAt         string          `json:"createdAt"`
+	ID               string          `json:"id"`
+	ScheduledJobID   string          `json:"scheduledJobId"`
+	ClientID         string          `json:"clientId,omitempty"`
+	JobCode          string          `json:"jobCode"`
+	TriggerKind      string          `json:"triggerKind"`
+	ScheduledFor     string          `json:"scheduledFor,omitempty"`
+	FiredAt          string          `json:"firedAt"`
+	DeliveredAt      string          `json:"deliveredAt,omitempty"`
+	CompletedAt      string          `json:"completedAt,omitempty"`
+	Status           string          `json:"status"`
+	DeliveryAttempts int32           `json:"deliveryAttempts"`
+	DeliveryError    string          `json:"deliveryError,omitempty"`
+	CompletionStatus string          `json:"completionStatus,omitempty"`
+	CompletionResult json.RawMessage `json:"completionResult,omitempty"`
+	CorrelationID    string          `json:"correlationId,omitempty"`
+	CreatedAt        string          `json:"createdAt"`
 }
 
 // InstanceLogResponse — one log line from an instance.
@@ -191,22 +191,22 @@ type FireResponse struct {
 // ArchiveUnlisted archives jobs not in the list (note: this is in the
 // body, not the query — distinct from other sync endpoints).
 type SyncScheduledJobsRequest struct {
-	ClientID        string                  `json:"clientId,omitempty"`
-	Jobs            []SyncScheduledJobItem  `json:"jobs"`
-	ArchiveUnlisted bool                    `json:"archiveUnlisted,omitempty"`
+	ClientID        string                 `json:"clientId,omitempty"`
+	Jobs            []SyncScheduledJobItem `json:"jobs"`
+	ArchiveUnlisted bool                   `json:"archiveUnlisted,omitempty"`
 }
 
 // SyncScheduledJobItem — one entry in the sync payload.
 type SyncScheduledJobItem struct {
-	Code                string          `json:"code"`
-	Name                string          `json:"name"`
-	Description         string          `json:"description,omitempty"`
-	Crons               []string        `json:"crons"`
-	Timezone            string          `json:"timezone,omitempty"`
-	Payload             json.RawMessage `json:"payload,omitempty"`
-	Concurrent          bool            `json:"concurrent,omitempty"`
-	TracksCompletion    bool            `json:"tracksCompletion,omitempty"`
-	TimeoutSeconds      *int32          `json:"timeoutSeconds,omitempty"`
+	Code             string          `json:"code"`
+	Name             string          `json:"name"`
+	Description      string          `json:"description,omitempty"`
+	Crons            []string        `json:"crons"`
+	Timezone         string          `json:"timezone,omitempty"`
+	Payload          json.RawMessage `json:"payload,omitempty"`
+	Concurrent       bool            `json:"concurrent,omitempty"`
+	TracksCompletion bool            `json:"tracksCompletion,omitempty"`
+	TimeoutSeconds   *int32          `json:"timeoutSeconds,omitempty"`
 	// DeliveryMaxAttempts: defaults to 3 server-side when omitted (nil).
 	DeliveryMaxAttempts *int32 `json:"deliveryMaxAttempts,omitempty"`
 	TargetURL           string `json:"targetUrl,omitempty"`

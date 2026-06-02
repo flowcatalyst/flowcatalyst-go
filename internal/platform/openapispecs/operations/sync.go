@@ -66,7 +66,7 @@ func SyncOpenApiSpec(
 	// No-op short-circuit on byte-identical content.
 	if prior != nil && prior.SpecHash == newHash {
 		event := ApplicationOpenApiSpecSynced{
-			Metadata: usecase.NewEventMetadata(ec, SpecSyncedType, Source, subjectFor(prior.ID)),
+			Metadata:        usecase.NewEventMetadata(ec, SpecSyncedType, Source, subjectFor(prior.ID)),
 			ApplicationID:   cmd.ApplicationID,
 			ApplicationCode: cmd.ApplicationCode,
 			SpecID:          prior.ID,
@@ -113,7 +113,7 @@ func SyncOpenApiSpec(
 	}
 
 	event := ApplicationOpenApiSpecSynced{
-		Metadata: usecase.NewEventMetadata(ec, SpecSyncedType, Source, subjectFor(newSpec.ID)),
+		Metadata:             usecase.NewEventMetadata(ec, SpecSyncedType, Source, subjectFor(newSpec.ID)),
 		ApplicationID:        cmd.ApplicationID,
 		ApplicationCode:      cmd.ApplicationCode,
 		SpecID:               newSpec.ID,

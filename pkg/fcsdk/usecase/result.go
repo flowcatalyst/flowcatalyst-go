@@ -33,8 +33,8 @@ func (s success[E]) unwrap() (E, error) { return s.event, nil }
 // failure holds a use case error.
 type failure[E any] struct{ err error }
 
-func (failure[E]) isResult()              {}
-func (f failure[E]) unwrap() (E, error)   { var zero E; return zero, f.err }
+func (failure[E]) isResult()            {}
+func (f failure[E]) unwrap() (E, error) { var zero E; return zero, f.err }
 
 // Success constructs a Result wrapping a value. The sealed.Token is the
 // compile-time witness that the caller is internal to the SDK; external

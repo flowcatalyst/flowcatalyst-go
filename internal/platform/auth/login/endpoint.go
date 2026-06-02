@@ -625,5 +625,7 @@ func utf8Encode(buf []byte, r rune) int {
 // _platformauth references the auth subdomain package so the import
 // stays even if the only use disappears during edits. Removing the
 // blank doesn't change behavior.
-var _ = platformauth.ProviderOIDC
-var _ = errors.New
+var (
+	_ = platformauth.ProviderOIDC
+	_ = errors.New
+)

@@ -93,15 +93,15 @@ func ParseSchemaType(s string) SchemaType {
 
 // SpecVersion is a schema version row.
 type SpecVersion struct {
-	ID             string            `json:"id"`
-	EventTypeID    string            `json:"eventTypeId"`
-	Version        string            `json:"version"`
-	MimeType       string            `json:"mimeType"`
-	SchemaContent  json.RawMessage   `json:"schemaContent,omitempty"`
-	SchemaType     SchemaType        `json:"schemaType"`
-	Status         SpecVersionStatus `json:"status"`
-	CreatedAt      time.Time         `json:"createdAt"`
-	UpdatedAt      time.Time         `json:"updatedAt"`
+	ID            string            `json:"id"`
+	EventTypeID   string            `json:"eventTypeId"`
+	Version       string            `json:"version"`
+	MimeType      string            `json:"mimeType"`
+	SchemaContent json.RawMessage   `json:"schemaContent,omitempty"`
+	SchemaType    SchemaType        `json:"schemaType"`
+	Status        SpecVersionStatus `json:"status"`
+	CreatedAt     time.Time         `json:"createdAt"`
+	UpdatedAt     time.Time         `json:"updatedAt"`
 }
 
 // NewSpecVersion mints a new schema version.

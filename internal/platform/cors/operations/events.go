@@ -8,9 +8,9 @@ import (
 )
 
 const (
-	CorsOriginAddedType    = "platform:admin:cors:origin-added"
-	CorsOriginDeletedType  = "platform:admin:cors:origin-deleted"
-	CorsSource             = "platform:admin"
+	CorsOriginAddedType   = "platform:admin:cors:origin-added"
+	CorsOriginDeletedType = "platform:admin:cors:origin-deleted"
+	CorsSource            = "platform:admin"
 )
 
 func subjectFor(id string) string { return "platform.cors." + id }

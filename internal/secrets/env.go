@@ -8,7 +8,8 @@ import (
 )
 
 // EnvProvider reads secrets from environment variables.
-//   ref: env://VAR_NAME
+//
+//	ref: env://VAR_NAME
 type EnvProvider struct{}
 
 // NewEnvProvider constructs an env provider.

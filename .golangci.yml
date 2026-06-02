@@ -22,9 +22,10 @@ linters:
   settings:
     revive:
       rules:
+        # `exported` (doc comment on every exported symbol) is intentionally
+        # NOT enabled — the codebase doesn't document internal exported types
+        # and we don't require it; enforcing it meant ~1.5k low-value comments.
         - name: var-naming
-          severity: warning
-        - name: exported
           severity: warning
         - name: error-return
         - name: error-naming
@@ -44,14 +45,10 @@ linters:
       - internal/db/gen     # go-jet generated code
       - pkg/fcsdk/examples  # illustrative demo programs, not shipped
     rules:
-      # Keep existing exported names stable rather than rename — renaming
-      # exported types/consts churns callers and, for pkg/fcsdk, would break
-      # the published SDK. We accept the stutter nits.
-      - linters: [revive]
-        text: stutters
       # Test fixtures intentionally use fake credentials, insecure cookies, and
-      # fixed file modes; gosec findings there are noise.
-      - linters: [gosec]
+      # fixed file modes, and fabricate http responses with no body to close;
+      # gosec + bodyclose findings there are noise.
+      - linters: [gosec, bodyclose]
         path: _test\.go
 
 formatters:

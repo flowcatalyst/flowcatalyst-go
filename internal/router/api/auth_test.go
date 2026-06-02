@@ -97,15 +97,15 @@ func TestBasicAuth_PublicPathsBypass(t *testing.T) {
 
 func TestIsPublicPath(t *testing.T) {
 	cases := map[string]bool{
-		"/health":            true,
-		"/health/live":       true,
-		"/metrics":           true,
-		"/openapi.json":      true,
-		"/docs":              true,
+		"/health":              true,
+		"/health/live":         true,
+		"/metrics":             true,
+		"/openapi.json":        true,
+		"/docs":                true,
 		"/docs/swagger-ui.css": true,
-		"/messages":          false,
-		"/monitoring/pools":  false,
-		"/docsy":             false, // not a prefix match
+		"/messages":            false,
+		"/monitoring/pools":    false,
+		"/docsy":               false, // not a prefix match
 	}
 	for path, want := range cases {
 		if got := routerapi.IsPublicPath(path); got != want {

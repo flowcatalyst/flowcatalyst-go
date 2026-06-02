@@ -61,19 +61,19 @@ type PrincipalFilters struct {
 
 // PrincipalResponse is the platform's principal aggregate.
 type PrincipalResponse struct {
-	ID                string   `json:"id"`
-	PrincipalType     string   `json:"type"`
-	Scope             string   `json:"scope"`
-	ClientID          string   `json:"clientId,omitempty"`
-	Name              string   `json:"name"`
-	Active            bool     `json:"active"`
-	Email             string   `json:"email,omitempty"`
-	IdpType           string   `json:"idpType,omitempty"`
-	Roles             []string `json:"roles,omitempty"`
-	IsAnchorUser      bool     `json:"isAnchorUser,omitempty"`
-	GrantedClientIDs  []string `json:"grantedClientIds,omitempty"`
-	CreatedAt         string   `json:"createdAt"`
-	UpdatedAt         string   `json:"updatedAt"`
+	ID               string   `json:"id"`
+	PrincipalType    string   `json:"type"`
+	Scope            string   `json:"scope"`
+	ClientID         string   `json:"clientId,omitempty"`
+	Name             string   `json:"name"`
+	Active           bool     `json:"active"`
+	Email            string   `json:"email,omitempty"`
+	IdpType          string   `json:"idpType,omitempty"`
+	Roles            []string `json:"roles,omitempty"`
+	IsAnchorUser     bool     `json:"isAnchorUser,omitempty"`
+	GrantedClientIDs []string `json:"grantedClientIds,omitempty"`
+	CreatedAt        string   `json:"createdAt"`
+	UpdatedAt        string   `json:"updatedAt"`
 }
 
 // PrincipalListResponse — GET /api/principals.
