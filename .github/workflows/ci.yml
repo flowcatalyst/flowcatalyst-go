@@ -68,6 +68,14 @@ jobs:
         with:
           go-version: "1.26"
           cache: true
+      # frontend/embed.go has `//go:embed all:dist`. We don't build the SPA
+      # for linting, but the embed needs >=1 file under frontend/dist or the
+      # package fails to typecheck — which aborts golangci's package load and
+      # masks every other finding. Drop in a placeholder so all packages load
+      # and the real linters run. (frontend/dist is gitignored; this stub is
+      # CI-only and never committed.)
+      - name: Stub embedded SPA dir so the embed typechecks
+        run: mkdir -p frontend/dist && touch frontend/dist/.gitkeep
       # v7 installs golangci-lint v2 (matches the v2 .golangci.yml and is
       # built with a Go new enough for the repo's go1.26). Timeout comes from
       # .golangci.yml (run.timeout).
