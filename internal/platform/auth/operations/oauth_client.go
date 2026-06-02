@@ -28,6 +28,7 @@ type CreateOAuthClientCommand struct {
 	AllowedOrigins         []string `json:"allowedOrigins,omitempty"`
 	ApplicationIDs         []string `json:"applicationIds,omitempty"`
 	PrincipalID            *string  `json:"principalId,omitempty"`
+	PKCERequired           *bool    `json:"pkceRequired,omitempty"`
 }
 
 func CreateOAuthClient(
@@ -61,6 +62,9 @@ func CreateOAuthClient(
 	c.AllowedOrigins = cmd.AllowedOrigins
 	c.ApplicationIDs = cmd.ApplicationIDs
 	c.PrincipalID = cmd.PrincipalID
+	if cmd.PKCERequired != nil {
+		c.PKCERequired = *cmd.PKCERequired
+	}
 	if t == auth.OAuthClientConfidential {
 		plaintext, ref, err := generateSecret()
 		if err != nil {

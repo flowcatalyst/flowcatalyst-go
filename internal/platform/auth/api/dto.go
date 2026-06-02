@@ -26,9 +26,10 @@ type CreateOAuthClientRequest struct {
 	DefaultScopes string `json:"defaultScopes,omitempty"`
 	// Scopes is the legacy array form (kept for back-compat with older callers).
 	Scopes []string `json:"scopes,omitempty"`
-	// PKCERequired is accepted but not persisted — the Go entity does not
-	// store a pkce flag. See OAuthClientResponse.PKCERequired (always false).
-	PKCERequired bool `json:"pkceRequired,omitempty"`
+	// PKCERequired toggles whether /oauth/authorize demands a code_challenge.
+	// Pointer so an omitted value keeps the entity's type-derived default
+	// rather than forcing false.
+	PKCERequired *bool `json:"pkceRequired,omitempty"`
 	// PostLogoutRedirectURIs is the OIDC RP-Initiated Logout whitelist,
 	// persisted and validated by /auth/oidc/session/end.
 	PostLogoutRedirectURIs []string `json:"postLogoutRedirectUris,omitempty"`
@@ -57,6 +58,7 @@ func (r CreateOAuthClientRequest) toCommand() operations.CreateOAuthClientComman
 		AllowedOrigins:         r.AllowedOrigins,
 		ApplicationIDs:         r.ApplicationIDs,
 		PrincipalID:            r.PrincipalID,
+		PKCERequired:           r.PKCERequired,
 	}
 }
 
@@ -121,7 +123,7 @@ type OAuthClientResponse struct {
 	GrantTypes             []string `json:"grantTypes"`
 	// DefaultScopes is the entity's Scopes slice (renamed for the SPA).
 	DefaultScopes []string `json:"defaultScopes"`
-	// PKCERequired has no entity field — always false. (defaulted)
+	// PKCERequired mirrors the entity's pkce_required flag.
 	PKCERequired   bool     `json:"pkceRequired"`
 	ApplicationIDs []string `json:"applicationIds"`
 	// Applications is the {id, name} display form of ApplicationIDs,
@@ -171,7 +173,7 @@ func oauthClientFromEntity(c *auth.OAuthClient) OAuthClientResponse {
 		AllowedOrigins:            origins,
 		GrantTypes:                grants,
 		DefaultScopes:             scopes,
-		PKCERequired:              false,
+		PKCERequired:              c.PKCERequired,
 		ApplicationIDs:            appIDs,
 		Applications:              []OAuthClientApplicationRef{},
 		Active:                    c.Active,
