@@ -73,6 +73,13 @@ func (s *State) Authorize(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "Invalid redirect_uri")
 		return
 	}
+	// The authorization-code flow starts here, so the client must be
+	// permitted the authorization_code grant. Checked after redirect_uri
+	// validation so we only bounce the UA back to a vetted URI.
+	if !grantAllowed(client, "authorization_code") {
+		errorRedirect(w, r, redirectURI, "unauthorized_client", "Client is not permitted to use the authorization_code grant", stateParam)
+		return
+	}
 	if client.PKCERequired && codeChallenge == "" {
 		errorRedirect(w, r, redirectURI, "invalid_request", "PKCE code_challenge is required", stateParam)
 		return

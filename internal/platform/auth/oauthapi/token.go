@@ -162,6 +162,15 @@ func (s *State) Token(w http.ResponseWriter, r *http.Request) {
 		authenticatedClient = c
 	}
 
+	// Enforce the client's registered grant-type allowlist for the two
+	// client-authenticated grants. client_credentials is checked inside its
+	// own handler (it authenticates there).
+	if authenticatedClient != nil && !grantAllowed(authenticatedClient, req.GrantType) {
+		writeOAuthError(w, http.StatusBadRequest, "unauthorized_client",
+			"Client is not permitted to use the '"+req.GrantType+"' grant type")
+		return
+	}
+
 	switch req.GrantType {
 	case "authorization_code":
 		s.handleAuthorizationCodeGrant(w, r, req, authenticatedClient)
@@ -279,6 +288,13 @@ func (s *State) handleClientCredentialsGrant(w http.ResponseWriter, r *http.Requ
 	if client.ClientType != auth.OAuthClientConfidential {
 		writeOAuthError(w, http.StatusUnauthorized, "unauthorized_client",
 			"Public clients cannot use client_credentials grant")
+		return
+	}
+	if !grantAllowed(client, "client_credentials") {
+		reason := "client_credentials grant not permitted for this client"
+		s.recordAttempt(r.Context(), loginattempt.AttemptServiceAccountToken, loginattempt.OutcomeFailure, req.ClientID, nil, &reason)
+		writeOAuthError(w, http.StatusUnauthorized, "unauthorized_client",
+			"Client is not permitted to use the client_credentials grant type")
 		return
 	}
 	if client.SecretRef == nil {
@@ -561,6 +577,25 @@ func isUnreserved(b byte) bool {
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────
+
+// grantAllowed reports whether the client's registered grant-type
+// allowlist (oauth_client_grant_types, managed via the admin API) permits
+// the given grant. An empty allowlist means the client never declared one
+// — e.g. registered before grant-type enforcement existed — and is treated
+// as unrestricted so those clients keep working; a non-empty list is
+// enforced strictly. Shared by /oauth/authorize (authorization_code) and
+// /oauth/token (all grants).
+func grantAllowed(client *auth.OAuthClient, grant string) bool {
+	if client == nil || len(client.GrantTypes) == 0 {
+		return true
+	}
+	for _, g := range client.GrantTypes {
+		if g == grant {
+			return true
+		}
+	}
+	return false
+}
 
 func scopeHas(scope, want string) bool { return scopesContain(strings.Fields(scope), want) }
 
