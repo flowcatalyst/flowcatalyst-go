@@ -26,11 +26,11 @@ import (
 //     service rejects each other's tokens). Production must supply (1) or (2).
 func LoadSigningKeyOrEphemeral(path string) []byte {
 	if path != "" {
-		if b, err := os.ReadFile(path); err == nil {
+		b, err := os.ReadFile(path)
+		if err == nil {
 			return b
-		} else {
-			slog.Warn("FC_JWT_SIGNING_KEY_PATH unreadable, falling back", "err", err)
 		}
+		slog.Warn("FC_JWT_SIGNING_KEY_PATH unreadable, falling back", "err", err)
 	}
 	// FLOWCATALYST_JWT_PRIVATE_KEY first: it's the key the Rust system signs
 	// with, so reading it keeps Go RS256 tokens validating against the same

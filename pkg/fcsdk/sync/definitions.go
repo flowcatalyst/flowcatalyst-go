@@ -49,6 +49,7 @@ type EventTypeDefinition struct {
 func MakeEventType(code, name string) EventTypeDefinition {
 	return EventTypeDefinition{Code: code, Name: name}
 }
+
 func (e EventTypeDefinition) WithDescription(d string) EventTypeDefinition {
 	e.Description = d
 	return e
@@ -78,14 +79,17 @@ type SubscriptionDefinition struct {
 func MakeSubscription(code, name, target string) SubscriptionDefinition {
 	return SubscriptionDefinition{Code: code, Name: name, Target: target}
 }
+
 func (s SubscriptionDefinition) WithDescription(d string) SubscriptionDefinition {
 	s.Description = d
 	return s
 }
+
 func (s SubscriptionDefinition) WithConnection(id string) SubscriptionDefinition {
 	s.ConnectionID = id
 	return s
 }
+
 func (s SubscriptionDefinition) WithDispatchPool(code string) SubscriptionDefinition {
 	s.DispatchPoolCode = code
 	return s
@@ -95,11 +99,14 @@ func (s SubscriptionDefinition) WithMaxRetries(n uint32) SubscriptionDefinition 
 	s.MaxRetries = &n
 	return s
 }
+
 func (s SubscriptionDefinition) WithTimeout(secs uint32) SubscriptionDefinition {
 	s.TimeoutSeconds = &secs
 	return s
 }
+
 func (s SubscriptionDefinition) DataOnlyEnabled() SubscriptionDefinition { s.DataOnly = true; return s }
+
 func (s SubscriptionDefinition) Bind(eventTypeCode, filter string) SubscriptionDefinition {
 	s.EventTypes = append(s.EventTypes, SubscriptionBinding{EventTypeCode: eventTypeCode, Filter: filter})
 	return s
@@ -116,10 +123,12 @@ type DispatchPoolDefinition struct {
 func MakeDispatchPool(code, name string) DispatchPoolDefinition {
 	return DispatchPoolDefinition{Code: code, Name: name}
 }
+
 func (d DispatchPoolDefinition) WithDescription(s string) DispatchPoolDefinition {
 	d.Description = s
 	return d
 }
+
 func (d DispatchPoolDefinition) WithConcurrency(c uint32) DispatchPoolDefinition {
 	d.Concurrency = c
 	return d
@@ -159,7 +168,9 @@ type ProcessDefinition struct {
 func MakeProcess(code, name string) ProcessDefinition {
 	return ProcessDefinition{Code: code, Name: name}
 }
+
 func (p ProcessDefinition) WithDescription(s string) ProcessDefinition { p.Description = s; return p }
+
 func (p ProcessDefinition) WithSteps(steps json.RawMessage) ProcessDefinition {
 	p.Steps = steps
 	return p

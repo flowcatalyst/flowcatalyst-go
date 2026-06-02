@@ -22,14 +22,27 @@ linters:
   settings:
     revive:
       rules:
-        # `exported` (doc comment on every exported symbol) is intentionally
-        # NOT enabled — the codebase doesn't document internal exported types
-        # and we don't require it; enforcing it meant ~1.5k low-value comments.
-        - name: var-naming
-          severity: warning
+        # Two revive rules are intentionally NOT enabled:
+        #  - `exported` (doc comment on every exported symbol) flagged ~1.5k
+        #    internal symbols the codebase never documented; we don't require it.
+        #  - `var-naming` wants exported OpenApi*→OpenAPI* renames (incl. a
+        #    pkg/fcsdk SDK const + wire DTOs). "OpenApi" is the consistent house
+        #    spelling; renaming would break the API, so we keep it.
         - name: error-return
         - name: error-naming
         - name: indent-error-flow
+    errcheck:
+      # Fire-and-forget cleanup: deferred Close/Rollback and best-effort
+      # stdout writes. Their errors aren't actionable.
+      exclude-functions:
+        - (io.Closer).Close
+        - (net/http.File).Close
+        - (*database/sql.DB).Close
+        - (*database/sql.Rows).Close
+        - (github.com/jackc/pgx/v5.BatchResults).Close
+        - (github.com/jackc/pgx/v5.Tx).Rollback
+        - (*go.mongodb.org/mongo-driver/mongo.Cursor).Close
+        - fmt.Fprintf
     gosec:
       excludes:
         - G104  # audit errors not checked — we use revive's error-return instead
@@ -46,9 +59,10 @@ linters:
       - pkg/fcsdk/examples  # illustrative demo programs, not shipped
     rules:
       # Test fixtures intentionally use fake credentials, insecure cookies, and
-      # fixed file modes, and fabricate http responses with no body to close;
-      # gosec + bodyclose findings there are noise.
-      - linters: [gosec, bodyclose]
+      # fixed file modes, fabricate http responses with no body to close, and
+      # use helpers whose params are constant within the suite; gosec +
+      # bodyclose + unparam findings there are noise.
+      - linters: [gosec, bodyclose, unparam]
         path: _test\.go
 
 formatters:

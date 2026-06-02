@@ -19,11 +19,9 @@ func TestGroupQueueIsStrictFIFO(t *testing.T) {
 	}
 
 	// Interleave regular and "high priority" — HighPriority must be ignored.
-	for _, m := range []common.QueuedMessage{
+	gq.msgs = append(gq.msgs, []common.QueuedMessage{
 		mk("a", false), mk("b", true), mk("c", false), mk("d", true),
-	} {
-		gq.msgs = append(gq.msgs, m)
-	}
+	}...)
 
 	var drained []string
 	for !gq.empty() {

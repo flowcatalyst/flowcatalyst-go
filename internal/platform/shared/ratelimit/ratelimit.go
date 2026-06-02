@@ -129,12 +129,12 @@ func Build(ctx context.Context, pool *pgxpool.Pool) Store {
 		return NoopStore{}
 	}
 	if url := os.Getenv("FC_REDIS_URL"); url != "" {
-		if s, err := NewRedisStore(ctx, url); err == nil {
+		s, err := NewRedisStore(ctx, url)
+		if err == nil {
 			slog.Info("distributed rate-limit store: Redis", "redis_url", redactURL(url))
 			return s
-		} else {
-			slog.Warn("FC_REDIS_URL set but Redis unreachable; falling back to Postgres rate-limit store", "err", err)
 		}
+		slog.Warn("FC_REDIS_URL set but Redis unreachable; falling back to Postgres rate-limit store", "err", err)
 	} else {
 		slog.Info("FC_REDIS_URL not set; using Postgres rate-limit store")
 	}
