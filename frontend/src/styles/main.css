@@ -9,10 +9,10 @@ html,
 body {
 	height: 100%;
 	margin: 0;
-	/* 14px base scales every rem-based PrimeVue token down ~12% from the
-	   browser default 16px. Pairs with the FlowCatalystPreset density tokens
-	   in main.ts. */
-	font-size: 14px;
+	/* 12.6px base scales every rem-based PrimeVue token down ~10% from the
+	   previous 14px (and ~21% from the browser default 16px). Pairs with the
+	   FlowCatalystPreset density tokens in main.ts. */
+	font-size: 12.6px;
 	font-family:
 		"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
 		"Helvetica Neue", Arial, sans-serif;

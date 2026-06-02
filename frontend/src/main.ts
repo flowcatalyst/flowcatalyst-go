@@ -32,7 +32,7 @@ app.use(router);
 // content-light marketing layouts; this admin UI is data-dense, so we shrink
 // the semantic form-field padding (which Button/InputText/Select/MultiSelect/
 // Textarea all read) and the DataTable header/body cell padding. Combined
-// with the 14px base font in main.css this scales the whole UI ~12% tighter
+// with the 12.6px base font in main.css this scales the whole UI tighter
 // without per-component `size="small"` annotations.
 const FlowCatalystPreset = definePreset(Nora, {
 	semantic: {
