@@ -6719,11 +6719,20 @@
           "clientName": {
             "type": "string"
           },
+          "defaultScopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "grantTypes": {
             "items": {
               "type": "string"
             },
             "type": "array"
+          },
+          "pkceRequired": {
+            "type": "boolean"
           },
           "postLogoutRedirectUris": {
             "items": {
