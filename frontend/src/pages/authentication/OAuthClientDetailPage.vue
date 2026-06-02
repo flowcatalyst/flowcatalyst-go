@@ -14,7 +14,11 @@ const client = ref<OAuthClient | null>(null);
 const applications = ref<Application[]>([]);
 const loading = ref(true);
 const saving = ref(false);
+// `error` is the PAGE-level (load) error — it replaces the whole card. Save
+// failures use `saveError`, shown inline in the edit form, so a failed save
+// never blanks the form the user is still editing.
 const error = ref<string | null>(null);
+const saveError = ref<string | null>(null);
 
 // Edit mode
 const isEditing = ref(false);
@@ -134,11 +138,13 @@ function resetEditForm() {
 
 function startEditing() {
 	resetEditForm();
+	saveError.value = null;
 	isEditing.value = true;
 }
 
 function cancelEditing() {
 	resetEditForm();
+	saveError.value = null;
 	isEditing.value = false;
 }
 
@@ -203,25 +209,31 @@ async function saveChanges() {
 	if (!client.value || !isValid.value) return;
 
 	saving.value = true;
-	error.value = null;
+	saveError.value = null;
 
 	try {
-		await oauthClientsApi.update(client.value.id, {
-			clientName: editForm.value.clientName.trim(),
-			redirectUris: editForm.value.redirectUris,
-			postLogoutRedirectUris: editForm.value.postLogoutRedirectUris,
-			allowedOrigins: editForm.value.allowedOrigins,
-			grantTypes: editForm.value.grantTypes,
-			defaultScopes: editForm.value.defaultScopes,
-			pkceRequired: editForm.value.pkceRequired,
-			applicationIds: editForm.value.applicationIds,
-		});
+		await oauthClientsApi.update(
+			client.value.id,
+			{
+				clientName: editForm.value.clientName.trim(),
+				redirectUris: editForm.value.redirectUris,
+				postLogoutRedirectUris: editForm.value.postLogoutRedirectUris,
+				allowedOrigins: editForm.value.allowedOrigins,
+				grantTypes: editForm.value.grantTypes,
+				defaultScopes: editForm.value.defaultScopes,
+				pkceRequired: editForm.value.pkceRequired,
+				applicationIds: editForm.value.applicationIds,
+			},
+			// Handled inline below — don't also fire the global red banner.
+			{ suppressGlobalErrorToast: true },
+		);
 
 		await loadClient();
 		isEditing.value = false;
 		toast.success("Success", "OAuth client updated successfully");
 	} catch (e: unknown) {
-		error.value = getErrorMessage(e, "Failed to update OAuth client");
+		// Keep the form populated so the user can correct and retry.
+		saveError.value = getErrorMessage(e, "Failed to update OAuth client");
 	} finally {
 		saving.value = false;
 	}
@@ -614,6 +626,15 @@ function getClientTypeSeverity(clientType: string) {
               <ul class="validation-list">
                 <li v-for="err in validationErrors" :key="err">{{ err }}</li>
               </ul>
+            </Message>
+
+            <Message
+              v-if="saveError"
+              severity="error"
+              :closable="false"
+              class="validation-message"
+            >
+              {{ saveError }}
             </Message>
 
             <div class="form-actions">
