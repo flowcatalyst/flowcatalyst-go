@@ -6704,6 +6704,18 @@
             "readOnly": true,
             "type": "string"
           },
+          "allowedOrigins": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "applicationIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clientName": {
             "type": "string"
           },
