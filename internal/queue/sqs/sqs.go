@@ -254,20 +254,24 @@ func (q *Queue) Ack(ctx context.Context, receipt string) error {
 	return nil
 }
 
-// Nack restores visibility (delay 0 = immediate retry). Counts as failure.
-func (q *Queue) Nack(ctx context.Context, receipt string, delaySeconds *uint32) error {
-	if err := q.changeVisibility(ctx, receipt, delaySeconds); err != nil {
-		return err
-	}
+// Nack is intentionally a NO-OP for SQS. The router retries failed messages
+// in-process — it keeps them in the message-group pipeline with an internal
+// backoff rather than releasing them to the broker — so it must NOT shorten
+// the visibility timeout here. Doing so would let SQS redeliver the message
+// (to this or another replica) while the router is still retrying it. Instead
+// the message stays invisible until its visibility timeout lapses naturally;
+// any such redelivery is deduplicated by broker MessageId (the router swaps the
+// receipt handle onto the in-flight copy and drops the duplicate). The message
+// only leaves SQS when the router DeleteMessages it on success. delaySeconds is
+// ignored by design. The counter is kept for observability.
+func (q *Queue) Nack(_ context.Context, _ string, _ *uint32) error {
 	q.nacked.Add(1)
 	return nil
 }
 
-// Defer restores visibility without counting as failure. Used for rate limits.
-func (q *Queue) Defer(ctx context.Context, receipt string, delaySeconds *uint32) error {
-	if err := q.changeVisibility(ctx, receipt, delaySeconds); err != nil {
-		return err
-	}
+// Defer is a NO-OP for the same reason as Nack — 429 / circuit-open retries are
+// also driven in-process. See Nack.
+func (q *Queue) Defer(_ context.Context, _ string, _ *uint32) error {
 	q.deferred.Add(1)
 	return nil
 }

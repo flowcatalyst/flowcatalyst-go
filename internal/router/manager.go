@@ -274,6 +274,19 @@ func (m *Manager) route(ctx context.Context, msgs []common.QueuedMessage, source
 		msg := msgs[i]
 		msg.BatchID = batchID
 
+		// R3: broker redelivery of an in-flight message — the SAME broker
+		// MessageId is already being processed or retried in-pipeline (e.g. an
+		// SQS visibility-timeout redelivery of a message the pool is backing
+		// off on). Swap the freshest receipt handle onto the in-flight entry
+		// (so the eventual ACK/DeleteMessage uses a valid handle) and DROP this
+		// copy. There is nothing to release — SQS Nack is a no-op — so dropping
+		// it is correct; the original copy still owns the work.
+		if m.tracker != nil && m.tracker.SwapReceiptIfInFlight(msg.BrokerMessageID, msg.ReceiptHandle) {
+			slog.Debug("broker redelivery of in-flight message; swapped receipt handle, dropped copy",
+				"msg", msg.Message.ID, "queue", source.Identifier())
+			continue
+		}
+
 		// R4: external-requeue dedup — the same application message ID is
 		// already in flight under a DIFFERENT broker id (an external process
 		// requeued a message stuck in QUEUED). ACK this copy to remove it.

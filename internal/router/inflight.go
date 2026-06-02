@@ -67,6 +67,58 @@ func (t *InFlightTracker) IsExternalRequeue(appMsgID, brokerID string) bool {
 	return ok && e.BrokerMessageID != "" && e.BrokerMessageID != brokerID
 }
 
+// SwapReceiptIfInFlight updates the receipt handle of an already-tracked
+// message identified by its broker id, returning true when it was present.
+// The Manager calls this at route time on a broker redelivery (same broker
+// MessageId — e.g. an SQS visibility-timeout redelivery) of a message that is
+// still being processed or retried in-pipeline: the in-pipeline copy adopts
+// the freshest handle (so its eventual ACK/DeleteMessage uses a valid one) and
+// the redelivered copy is dropped. A blank broker id never matches.
+func (t *InFlightTracker) SwapReceiptIfInFlight(brokerID, receipt string) bool {
+	if brokerID == "" {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if im, ok := t.byBroker[brokerID]; ok {
+		im.UpdateReceiptHandle(receipt)
+		return true
+	}
+	return false
+}
+
+// CurrentReceipt returns the freshest receipt handle for a tracked message
+// (broker id preferred, message id fallback) — the handle to ACK with after a
+// possible redelivery swap. Reports false when the message is no longer tracked.
+func (t *InFlightTracker) CurrentReceipt(messageID, brokerID string) (string, bool) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if brokerID != "" {
+		if im, ok := t.byBroker[brokerID]; ok {
+			return im.ReceiptHandle, true
+		}
+	}
+	if im, ok := t.byMessage[messageID]; ok {
+		return im.ReceiptHandle, true
+	}
+	return "", false
+}
+
+// MarkRetrying records that a tracked message is being retried in-pipeline by
+// bumping its attempt count, so the stall detector and the reaper leave it
+// alone (it is legitimately retrying, not stuck). No-op when the entry is gone.
+func (t *InFlightTracker) MarkRetrying(messageID, brokerID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	im := t.byMessage[messageID]
+	if im == nil && brokerID != "" {
+		im = t.byBroker[brokerID]
+	}
+	if im != nil {
+		im.Attempts++
+	}
+}
+
 // Remove clears the message from the tracker. Idempotent.
 func (t *InFlightTracker) Remove(messageID, brokerID string) {
 	t.mu.Lock()
@@ -101,6 +153,12 @@ func (t *InFlightTracker) Reap(maxAge time.Duration) (reaped int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for id, im := range t.byMessage {
+		// Never reap a message that is actively being retried in-pipeline —
+		// it is legitimately long-lived, not stuck, and dropping its entry
+		// would blind the redelivery dedup.
+		if im.Attempts > 0 {
+			continue
+		}
 		if time.Since(im.StartedAt) > maxAge {
 			delete(t.byMessage, id)
 			if im.BrokerMessageID != "" {
@@ -174,6 +232,12 @@ func (d *StallDetector) Watch(ctx context.Context) {
 func (d *StallDetector) tick(ctx context.Context) {
 	stalled := []common.InFlightMessage{}
 	for _, im := range d.tracker.Snapshot() {
+		// Messages being retried in-pipeline (Attempts>0) are not stalled —
+		// they sit in-flight across backoff windows by design. Skip them so
+		// they neither warn nor get force-NACKed out from under the retry.
+		if im.Attempts > 0 {
+			continue
+		}
 		if im.ElapsedSeconds() >= int64(d.cfg.StallThresholdSeconds) {
 			stalled = append(stalled, im)
 		}

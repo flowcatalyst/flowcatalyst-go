@@ -57,20 +57,30 @@ func (c *cascadeConsumer) Metrics(context.Context) (*queue.Metrics, error) {
 }
 func (c *cascadeConsumer) Counters() *queue.Metrics { return nil }
 
-// cascadeMediator fails the message whose ID == failID and records every ID
-// it was asked to mediate.
+// cascadeMediator records every ID it was asked to mediate and fails the
+// message whose ID == failID. failTimes bounds how many times failID fails
+// before it starts succeeding (0 = fail forever); this lets a test exercise
+// the in-pipeline retry loop and confirm a message eventually succeeds. A
+// transient failure returns DelaySeconds:0 so the retry backoff stays small.
 type cascadeMediator struct {
-	failID string
-	mu     sync.Mutex
-	seen   []string
+	failID    string
+	failTimes int
+	mu        sync.Mutex
+	seen      []string
+	failed    int
 }
 
 func (m *cascadeMediator) Mediate(_ context.Context, msg *common.Message) common.MediationOutcome {
 	m.mu.Lock()
 	m.seen = append(m.seen, msg.ID)
+	fail := false
+	if msg.ID == m.failID && (m.failTimes == 0 || m.failed < m.failTimes) {
+		m.failed++
+		fail = true
+	}
 	m.mu.Unlock()
-	if msg.ID == m.failID {
-		return common.MediationOutcome{Result: common.MediationErrorProcess, DelaySeconds: 1}
+	if fail {
+		return common.MediationOutcome{Result: common.MediationErrorProcess, DelaySeconds: 0}
 	}
 	return common.MediationOutcome{Result: common.MediationSuccess}
 }
@@ -89,13 +99,14 @@ func newCascadePool(med Mediator, resolve func(string) queue.Consumer) *Pool {
 	return NewPool(cfg, med, nil, resolve)
 }
 
-// TestPoolBatchGroupCascadeNack verifies Rust-parity FIFO behaviour for
-// ORDERED-mode messages: when the first message in a (batch, group) fails
-// transiently, the remaining ordered messages in that batch+group are NACKed
-// without being attempted, preserving ordering. The cascade is an ordering
-// feature, so the messages carry BLOCK_ON_ERROR — IMMEDIATE-mode messages
-// dispatch concurrently and do NOT cascade (see TestPoolImmediateModeNoCascade).
-func TestPoolBatchGroupCascadeNack(t *testing.T) {
+// TestPoolOrderedRetryPreservesFIFO verifies the ordered-delivery contract
+// under the in-pipeline retry model: when the head of an ordered group fails
+// transiently, it is re-inserted at the FRONT and retried (blocking the group,
+// head-of-line) until it succeeds — and only THEN do the later messages run.
+// Nothing is released to the broker on failure (no NACKs); the message stays in
+// the pipeline. m1 fails twice then succeeds, so the attempt order is
+// m1,m1,m1,m2,m3 and all three are ACKed.
+func TestPoolOrderedRetryPreservesFIFO(t *testing.T) {
 	group := "g"
 	mk := func(id string) common.QueuedMessage {
 		return common.QueuedMessage{
@@ -110,7 +121,7 @@ func TestPoolBatchGroupCascadeNack(t *testing.T) {
 		}
 	}
 	cons := &cascadeConsumer{wantTotal: 3, done: make(chan struct{})}
-	med := &cascadeMediator{failID: "m1"}
+	med := &cascadeMediator{failID: "m1", failTimes: 2}
 	pool := newCascadePool(med, func(string) queue.Consumer { return cons })
 
 	submitBatch(context.Background(), pool, []common.QueuedMessage{mk("m1"), mk("m2"), mk("m3")})
@@ -118,48 +129,7 @@ func TestPoolBatchGroupCascadeNack(t *testing.T) {
 	select {
 	case <-cons.done:
 	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for 3 terminal actions")
-	}
-
-	med.mu.Lock()
-	seen := append([]string(nil), med.seen...)
-	med.mu.Unlock()
-	cons.mu.Lock()
-	nacked := append([]string(nil), cons.nacked...)
-	cons.mu.Unlock()
-
-	assert.Equal(t, []string{"m1"}, seen, "only the first message in the batch+group should be attempted")
-	assert.ElementsMatch(t, []string{"m1", "m2", "m3"}, nacked, "all three should be NACKed (m1 transient, m2/m3 cascade)")
-}
-
-// TestPoolImmediateModeNoCascade verifies R1: IMMEDIATE-mode messages (the
-// default) dispatch independently — a transient failure of one does NOT
-// cascade-NACK the others in the same batch+group. With concurrency 1 the
-// three run one at a time, but each is attempted regardless of m1's failure.
-func TestPoolImmediateModeNoCascade(t *testing.T) {
-	group := "g"
-	mk := func(id string) common.QueuedMessage {
-		return common.QueuedMessage{
-			Message: common.Message{
-				ID:              id,
-				MediationType:   common.MediationTypeHTTP,
-				MediationTarget: "http://example.invalid",
-				MessageGroupID:  &group,
-				DispatchMode:    common.DispatchImmediate,
-			},
-			ReceiptHandle: id,
-		}
-	}
-	cons := &cascadeConsumer{wantTotal: 3, done: make(chan struct{})}
-	med := &cascadeMediator{failID: "m1"}
-	pool := newCascadePool(med, func(string) queue.Consumer { return cons })
-
-	submitBatch(context.Background(), pool, []common.QueuedMessage{mk("m1"), mk("m2"), mk("m3")})
-
-	select {
-	case <-cons.done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for 3 terminal actions")
+		t.Fatal("timed out waiting for 3 ACKs")
 	}
 
 	med.mu.Lock()
@@ -170,7 +140,55 @@ func TestPoolImmediateModeNoCascade(t *testing.T) {
 	acked := append([]string(nil), cons.acked...)
 	cons.mu.Unlock()
 
-	assert.ElementsMatch(t, []string{"m1", "m2", "m3"}, seen, "all three IMMEDIATE messages should be attempted (no cascade)")
-	assert.ElementsMatch(t, []string{"m1"}, nacked, "only the failing message should be NACKed")
-	assert.ElementsMatch(t, []string{"m2", "m3"}, acked, "the two successful messages should be ACKed")
+	assert.Equal(t, []string{"m1", "m1", "m1", "m2", "m3"}, seen,
+		"m1 must be retried at the front until it succeeds before m2/m3 are attempted")
+	assert.Empty(t, nacked, "in-pipeline retries must not NACK to the broker")
+	assert.ElementsMatch(t, []string{"m1", "m2", "m3"}, acked, "all three should ACK on success")
+}
+
+// TestPoolImmediateRetriesIndependently verifies that IMMEDIATE-mode messages
+// retry in-pipeline too, but independently (no group ordering): a transient
+// failure of one is retried until it succeeds without NACKing to the broker and
+// without blocking the others. m1 fails twice then succeeds; m2/m3 succeed
+// immediately; all three are eventually ACKed and m1 is attempted three times.
+func TestPoolImmediateRetriesIndependently(t *testing.T) {
+	mk := func(id string) common.QueuedMessage {
+		return common.QueuedMessage{
+			Message: common.Message{
+				ID:              id,
+				MediationType:   common.MediationTypeHTTP,
+				MediationTarget: "http://example.invalid",
+				DispatchMode:    common.DispatchImmediate,
+			},
+			ReceiptHandle: id,
+		}
+	}
+	cons := &cascadeConsumer{wantTotal: 3, done: make(chan struct{})}
+	med := &cascadeMediator{failID: "m1", failTimes: 2}
+	pool := newCascadePool(med, func(string) queue.Consumer { return cons })
+
+	submitBatch(context.Background(), pool, []common.QueuedMessage{mk("m1"), mk("m2"), mk("m3")})
+
+	select {
+	case <-cons.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for 3 ACKs")
+	}
+
+	med.mu.Lock()
+	m1Attempts := 0
+	for _, id := range med.seen {
+		if id == "m1" {
+			m1Attempts++
+		}
+	}
+	med.mu.Unlock()
+	cons.mu.Lock()
+	nacked := append([]string(nil), cons.nacked...)
+	acked := append([]string(nil), cons.acked...)
+	cons.mu.Unlock()
+
+	assert.Equal(t, 3, m1Attempts, "m1 is retried in-pipeline until it succeeds (2 fails + 1 success)")
+	assert.Empty(t, nacked, "in-pipeline retries must not NACK to the broker")
+	assert.ElementsMatch(t, []string{"m1", "m2", "m3"}, acked, "all three should ACK on success")
 }

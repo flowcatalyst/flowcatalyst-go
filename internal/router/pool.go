@@ -52,47 +52,32 @@ type Pool struct {
 	activeWorkers atomic.Uint32 // currently inside processOne
 
 	stopped atomic.Bool
-
-	// Batch+group FIFO cascade tracking. Mirrors Rust pool.rs
-	// failed_batch_groups / batch_group_message_count: once any message in a
-	// (batch_id, message_group) fails, the rest of that batch+group is NACKed
-	// un-attempted to preserve FIFO ordering. The state clears once all of the
-	// batch+group's messages have drained (count → 0). Only messages carrying
-	// a BatchID participate.
-	bgMu              sync.Mutex
-	failedBatchGroups map[string]struct{}
-	batchGroupCount   map[string]int
 }
 
-// groupQueue is the per-message-group buffer. High-priority messages
-// (Message.HighPriority=true) drain ahead of regular messages within
-// the same group; ordering within each priority class is FIFO. Mirrors
-// the Rust MessageGroupHandler in crates/fc-router/src/pool.rs:99-140
-// where high_priority and regular sit in separate VecDeques and the
-// drain loop pops high_priority first.
+// groupQueue is the per-message-group buffer: a single strict FIFO. A message
+// group is an ordering contract, so there is deliberately NO priority lane —
+// letting a "high priority" message jump ahead of an earlier one in the same
+// group would defeat in-order delivery. (Message.HighPriority is a queue-level
+// concern, not an intra-group one, and does not reorder here.) On a retryable
+// failure the drainer re-inserts the message at the FRONT (enqueueFront) so the
+// failed message is the next one attempted — never overtaken by a later one.
 type groupQueue struct {
-	highPriority []common.QueuedMessage
-	regular      []common.QueuedMessage
-	working      bool
+	msgs    []common.QueuedMessage
+	working bool
 }
 
-// pop returns the next message to dispatch (high-priority first) and
-// whether the queue is now empty. Caller holds p.mu.
+// pop returns the next message to dispatch (FIFO) and whether the queue is now
+// empty. Caller holds p.mu.
 func (gq *groupQueue) pop() (common.QueuedMessage, bool) {
-	if len(gq.highPriority) > 0 {
-		m := gq.highPriority[0]
-		gq.highPriority = gq.highPriority[1:]
-		return m, len(gq.highPriority) == 0 && len(gq.regular) == 0
-	}
-	m := gq.regular[0]
-	gq.regular = gq.regular[1:]
-	return m, len(gq.highPriority) == 0 && len(gq.regular) == 0
+	m := gq.msgs[0]
+	gq.msgs = gq.msgs[1:]
+	return m, len(gq.msgs) == 0
 }
 
 // empty reports whether the queue holds no pending messages. Caller
 // holds p.mu.
 func (gq *groupQueue) empty() bool {
-	return len(gq.highPriority) == 0 && len(gq.regular) == 0
+	return len(gq.msgs) == 0
 }
 
 // NewPool wires a pool. tracker may be nil; if so, in-flight tracking
@@ -120,9 +105,6 @@ func NewPool(cfg common.PoolConfig, mediator Mediator, tracker *InFlightTracker,
 		metrics:         NewPoolMetricsCollector(),
 		resolveConsumer: resolveConsumer,
 		groupQs:         make(map[string]*groupQueue),
-
-		failedBatchGroups: make(map[string]struct{}),
-		batchGroupCount:   make(map[string]int),
 	}
 	p.sem.Store(make(chan struct{}, concurrency))
 	p.concurrency.Store(concurrency)
@@ -145,21 +127,40 @@ func (p *Pool) consumerFor(qm common.QueuedMessage) queue.Consumer {
 	return p.resolveConsumer(qm.QueueIdentifier)
 }
 
-// ackMsg / nackMsg / deferMsg resolve a message's source consumer and apply
-// the terminal action there — a pool processes messages routed from many
-// queues, so the action must target the queue the message arrived on. A
-// missing consumer (deregistered queue) is logged and skipped.
-func (p *Pool) ackMsg(ctx context.Context, qm common.QueuedMessage) {
-	c := p.consumerFor(qm)
-	if c == nil {
-		slog.Warn("ack: no consumer for queue", "queue", qm.QueueIdentifier, "msg", qm.Message.ID)
-		return
+// ackTracked / nackMsg resolve a message's source consumer and apply the
+// terminal action there — a pool processes messages routed from many queues, so
+// the action must target the queue the message arrived on. A missing consumer
+// (deregistered queue) is logged and skipped.
+
+// ackTracked ACKs a terminally-resolved message (2xx success, or 4xx which we
+// drop to avoid an infinite client-error loop) using the FRESHEST receipt
+// handle recorded on its in-flight entry — a broker redelivery may have swapped
+// it since dispatch, and the handle captured at dispatch time can be stale by
+// the time a long in-pipeline retry finally succeeds. It then clears the entry.
+func (p *Pool) ackTracked(ctx context.Context, qm common.QueuedMessage) {
+	receipt := qm.ReceiptHandle
+	if p.tracker != nil {
+		if rh, ok := p.tracker.CurrentReceipt(qm.Message.ID, qm.BrokerMessageID); ok {
+			receipt = rh
+		}
 	}
-	if err := c.Ack(ctx, qm.ReceiptHandle); err != nil {
-		slog.Warn("ack failed", "msg", qm.Message.ID, "err", err)
+	if c := p.consumerFor(qm); c != nil {
+		if err := c.Ack(ctx, receipt); err != nil {
+			slog.Warn("ack failed", "msg", qm.Message.ID, "err", err)
+		}
+	} else {
+		slog.Warn("ack: no consumer for queue", "queue", qm.QueueIdentifier, "msg", qm.Message.ID)
+	}
+	if p.tracker != nil {
+		p.tracker.Remove(qm.Message.ID, qm.BrokerMessageID)
 	}
 }
 
+// nackMsg releases a message back to its source broker. It is used only for the
+// non-retryable control paths (pool stopped, pool at capacity, shutdown before
+// dispatch). NB: on SQS, Nack is a deliberate no-op — the message simply stays
+// invisible until its visibility timeout lapses and is then redelivered fresh.
+// Retryable mediation failures do NOT go here; they are retried in-pipeline.
 func (p *Pool) nackMsg(ctx context.Context, qm common.QueuedMessage, delay *uint32, reason string) {
 	c := p.consumerFor(qm)
 	if c == nil {
@@ -168,17 +169,6 @@ func (p *Pool) nackMsg(ctx context.Context, qm common.QueuedMessage, delay *uint
 	}
 	if err := c.Nack(ctx, qm.ReceiptHandle, delay); err != nil {
 		slog.Warn("nack failed", "reason", reason, "msg", qm.Message.ID, "err", err)
-	}
-}
-
-func (p *Pool) deferMsg(ctx context.Context, qm common.QueuedMessage, delay *uint32, reason string) {
-	c := p.consumerFor(qm)
-	if c == nil {
-		slog.Warn("defer: no consumer for queue", "queue", qm.QueueIdentifier, "msg", qm.Message.ID, "reason", reason)
-		return
-	}
-	if err := c.Defer(ctx, qm.ReceiptHandle, delay); err != nil {
-		slog.Warn("defer failed", "reason", reason, "msg", qm.Message.ID, "err", err)
 	}
 }
 
@@ -221,21 +211,22 @@ func (p *Pool) UpdateConcurrency(n uint32) bool {
 // when building EnhancedPoolMetrics for /monitoring/pool-stats.
 func (p *Pool) Metrics() *PoolMetricsCollector { return p.metrics }
 
-// submit routes one polled message, 1:1 with Rust ProcessPool::submit. It
-// runs the shared bookkeeping — capacity backpressure, batch+group FIFO
-// count, and the early failed-group NACK — then branches on DispatchMode:
-// IMMEDIATE-mode messages (the default, RequiresOrdering()==false) dispatch
-// concurrently via runImmediate (one worker per message, bounded only by
-// the pool semaphore), while ordered modes enqueue into the per-group FIFO
-// buffer and drain serially.
+// submit routes one polled message. It runs capacity backpressure, then
+// branches on DispatchMode: IMMEDIATE-mode messages (the default,
+// RequiresOrdering()==false) dispatch concurrently via runImmediate (one worker
+// per message, bounded only by the pool semaphore), while ordered modes enqueue
+// into the per-group FIFO buffer and drain serially. Retryable failures are
+// retried in-pipeline (see processOne / drainGroup / runImmediate), so ordering
+// is preserved by re-inserting a failed message at the FRONT of its group
+// rather than by cascade-NACKing the rest of a batch.
 func (p *Pool) submit(ctx context.Context, m common.QueuedMessage) {
-	// Reject when the pool is stopping (Rust submit nacks on !running).
+	// Reject when the pool is stopping.
 	if p.stopped.Load() {
 		p.nackMsg(ctx, m, ptrU32(10), "pool stopped")
 		return
 	}
 	// Capacity backpressure: NACK (delay 10) when the pre-dispatch buffer is
-	// already at capacity = max(concurrency*20, 50). Mirrors Rust's submit.
+	// already at capacity = max(concurrency*20, 50).
 	capacity := p.concurrency.Load() * queueCapacityMultiplier
 	if capacity < minQueueCapacity {
 		capacity = minQueueCapacity
@@ -243,17 +234,6 @@ func (p *Pool) submit(ctx context.Context, m common.QueuedMessage) {
 	if p.queueSize.Load() >= capacity {
 		p.nackMsg(ctx, m, ptrU32(10), "pool at capacity")
 		return
-	}
-
-	// Batch+group FIFO cascade (Rust pool.rs submit): count the message, and
-	// if its batch+group already failed, NACK it now so ordering is preserved.
-	if key, ok := p.batchKey(m); ok {
-		p.bgIncrement(key)
-		if p.bgFailed(key) {
-			p.bgDecrementAndCleanup(key)
-			p.nackMsg(ctx, m, ptrU32(10), "batch+group failed")
-			return
-		}
 	}
 
 	if !m.Message.DispatchMode.RequiresOrdering() {
@@ -274,27 +254,44 @@ func (p *Pool) submit(ctx context.Context, m common.QueuedMessage) {
 }
 
 // runImmediate dispatches a single IMMEDIATE-mode message concurrently:
-// acquire a pool semaphore slot, then process it. Unlike the ordered drain,
-// an IMMEDIATE message does NOT mark its batch+group failed on error
-// (cascade=false) — each message is independent. 1:1 with Rust
-// spawn_immediate_task.
+// acquire a pool semaphore slot, then process it. IMMEDIATE messages have no
+// group buffer, so a retryable failure re-dispatches the same message after the
+// backoff (one chained goroutine per failing message — sequential, not a leak),
+// keeping it in-pipeline rather than releasing it to the broker.
 func (p *Pool) runImmediate(ctx context.Context, m common.QueuedMessage) {
 	sem := p.loadSem()
 	select {
 	case <-ctx.Done():
-		// Shutdown before we could start — release the bookkeeping and NACK
-		// for prompt redelivery (mirrors Rust's semaphore-closed path).
+		// Shutdown before we could start. The message was never tracked/attempted
+		// (or its entry persists across the retry) — NACK is a no-op on SQS, so
+		// the broker redelivers it after the visibility timeout.
 		p.queueSize.Add(^uint32(0))
-		if key, ok := p.batchKey(m); ok {
-			p.bgDecrementAndCleanup(key)
-		}
 		p.nackMsg(ctx, m, ptrU32(10), "shutdown before dispatch")
 		return
 	case sem <- struct{}{}:
 	}
 	p.queueSize.Add(^uint32(0)) // now active, not queued
-	defer func() { <-sem }()    // release on every exit path (acquired above)
-	p.processOne(ctx, m, false)
+	result, retryAfter := func() (processResult, time.Duration) {
+		defer func() { <-sem }() // release on every exit path (acquired above)
+		return p.processOne(ctx, m)
+	}()
+	if result != processRetry {
+		return
+	}
+	// Retry in-pipeline: wait out the backoff, then re-dispatch. The in-flight
+	// tracker entry is kept (so redeliveries are deduped against it), and
+	// Attempts grows the backoff and tells processOne not to re-track.
+	m.Attempts++
+	p.queueSize.Add(1) // re-queued (pre-dispatch) for the duration of the backoff
+	go func() {
+		select {
+		case <-ctx.Done():
+			p.queueSize.Add(^uint32(0))
+			return
+		case <-time.After(retryAfter):
+		}
+		p.runImmediate(ctx, m)
+	}()
 }
 
 // Stop signals the pool to exit. Run will return on its next loop.
@@ -365,59 +362,7 @@ const (
 	minQueueCapacity        uint32 = 50
 )
 
-// batchKey returns the batch+group tracking key for m and whether m
-// participates in batch+group FIFO tracking (only messages with a BatchID
-// do). The key is internal-only and never crosses the wire.
-func (p *Pool) batchKey(m common.QueuedMessage) (string, bool) {
-	if m.BatchID == "" {
-		return "", false
-	}
-	group := ""
-	if m.Message.MessageGroupID != nil {
-		group = *m.Message.MessageGroupID
-	}
-	return m.BatchID + "\x00" + group, true
-}
-
-// bgIncrement records one more in-flight message for the batch+group.
-func (p *Pool) bgIncrement(key string) {
-	p.bgMu.Lock()
-	p.batchGroupCount[key]++
-	p.bgMu.Unlock()
-}
-
-// bgFailed reports whether the batch+group has already had a failure.
-func (p *Pool) bgFailed(key string) bool {
-	p.bgMu.Lock()
-	_, ok := p.failedBatchGroups[key]
-	p.bgMu.Unlock()
-	return ok
-}
-
-// bgMarkFailed marks the batch+group failed so its remaining messages cascade-NACK.
-func (p *Pool) bgMarkFailed(key string) {
-	p.bgMu.Lock()
-	p.failedBatchGroups[key] = struct{}{}
-	p.bgMu.Unlock()
-}
-
-// bgDecrementAndCleanup decrements the batch+group's in-flight count and, when
-// it reaches zero, drops both the count and failed-state entries so a later
-// batch reusing the same key starts clean. Mirrors Rust
-// decrement_and_cleanup_batch_group.
-func (p *Pool) bgDecrementAndCleanup(key string) {
-	p.bgMu.Lock()
-	if n, ok := p.batchGroupCount[key]; ok {
-		if n <= 1 {
-			delete(p.batchGroupCount, key)
-			delete(p.failedBatchGroups, key)
-		} else {
-			p.batchGroupCount[key] = n - 1
-		}
-	}
-	p.bgMu.Unlock()
-}
-
+// enqueue appends a newly-arrived message to the BACK of its group's FIFO.
 func (p *Pool) enqueue(group string, m common.QueuedMessage) {
 	p.mu.Lock()
 	gq, ok := p.groupQs[group]
@@ -425,11 +370,22 @@ func (p *Pool) enqueue(group string, m common.QueuedMessage) {
 		gq = &groupQueue{}
 		p.groupQs[group] = gq
 	}
-	if m.Message.HighPriority {
-		gq.highPriority = append(gq.highPriority, m)
-	} else {
-		gq.regular = append(gq.regular, m)
+	gq.msgs = append(gq.msgs, m)
+	p.mu.Unlock()
+	p.queueSize.Add(1)
+}
+
+// enqueueFront puts a message back at the HEAD of its group's FIFO so that a
+// retry is the NEXT message attempted — never overtaken by a later message in
+// the same group. Used only by the ordered drainer on a retryable failure.
+func (p *Pool) enqueueFront(group string, m common.QueuedMessage) {
+	p.mu.Lock()
+	gq, ok := p.groupQs[group]
+	if !ok {
+		gq = &groupQueue{}
+		p.groupQs[group] = gq
 	}
+	gq.msgs = append([]common.QueuedMessage{m}, gq.msgs...)
 	p.mu.Unlock()
 	p.queueSize.Add(1)
 }
@@ -480,15 +436,6 @@ func (p *Pool) drainGroup(ctx context.Context, group string) {
 		// consistent with what's actually buffered in groupQs.
 		p.queueSize.Add(^uint32(0)) // atomic decrement
 
-		// Batch+group FIFO cascade re-check (Rust pool.rs drain loop): the
-		// group may have failed after this message was enqueued. If so, NACK
-		// it instead of dispatching, preserving order.
-		if key, ok := p.batchKey(msg); ok && p.bgFailed(key) {
-			p.bgDecrementAndCleanup(key)
-			p.nackMsg(ctx, msg, ptrU32(10), "batch+group failed")
-			continue
-		}
-
 		// Acquire a concurrency slot. Snapshot the channel locally so a
 		// resize between acquire and release doesn't cross channels.
 		// Wakeup conditions:
@@ -504,72 +451,126 @@ func (p *Pool) drainGroup(ctx context.Context, group string) {
 		// Release the slot per iteration even if processOne panics past its own
 		// recover — a bare deferred <-sem would accumulate across the loop, so
 		// scope it to a closure.
-		func() {
+		result, retryAfter := func() (processResult, time.Duration) {
 			defer func() { <-sem }()
-			p.processOne(ctx, msg, true)
+			return p.processOne(ctx, msg)
 		}()
+
+		if result == processRetry {
+			// Preserve FIFO: re-insert the failed message at the FRONT of its
+			// group so it is the next one attempted, then wait out the backoff
+			// before the next attempt (holding no semaphore slot). The single
+			// drainer + front re-insert blocks the whole group on this message
+			// until it succeeds — the intended ordered-delivery (head-of-line)
+			// semantic. The in-flight tracker entry is kept across the retry.
+			msg.Attempts++
+			p.enqueueFront(group, msg)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(retryAfter):
+			}
+		}
 	}
 }
 
-// processOne runs the full per-message pipeline: dedup, rate limit,
-// circuit breaker, mediate, and ack/nack/defer by outcome. cascade controls
-// whether a transient failure marks this message's batch+group failed so
-// later ordered messages cascade-NACK — true for the ordered serial drain,
-// false for IMMEDIATE-mode workers (which are independent of each other).
-func (p *Pool) processOne(ctx context.Context, qm common.QueuedMessage, cascade bool) {
+// processResult is processOne's verdict, consumed by the caller (drainGroup /
+// runImmediate) to decide whether to ACK-and-drop, retry in-pipeline, or
+// discard a deduplicated copy.
+type processResult int
+
+const (
+	// processDone — terminally resolved (ACKed on 2xx success or 4xx drop);
+	// the in-flight entry has been cleared and the message leaves the pipeline.
+	processDone processResult = iota
+	// processRetry — retryable failure; the in-flight entry was KEPT and the
+	// caller should re-dispatch after the returned backoff (front of the group
+	// for ordered, delayed re-spawn for IMMEDIATE). Never released to the broker.
+	processRetry
+	// processDuplicate — this copy was a broker redelivery of a message already
+	// in-flight (process-time backstop for the route-time swap); the receipt
+	// handle was swapped onto the original entry and this copy is dropped.
+	processDuplicate
+)
+
+const (
+	// retryMinDelay / retryMaxDelay bound the in-pipeline backoff; panicRetryDelay
+	// is the fixed backoff after a recovered panic.
+	retryMinDelay   = 100 * time.Millisecond
+	retryMaxDelay   = 5 * time.Minute
+	panicRetryDelay = 10 * time.Second
+)
+
+// retryDelay computes the in-pipeline backoff before the next attempt:
+// exponential in the attempt count (starting at retryMinDelay), with any
+// server-requested delay (Retry-After on 429, the breaker reset on circuit-open,
+// the 5xx retry hint) applied as a floor, capped at retryMaxDelay.
+func retryDelay(attempts uint, outcomeDelaySec int) time.Duration {
+	shift := attempts
+	if shift > 12 { // cap the shift so the bit-shift can't overflow
+		shift = 12
+	}
+	d := retryMinDelay << shift
+	if floor := time.Duration(outcomeDelaySec) * time.Second; d < floor {
+		d = floor
+	}
+	if d > retryMaxDelay {
+		d = retryMaxDelay
+	}
+	return d
+}
+
+// processOne runs the per-message pipeline: track (first dispatch only), rate
+// limit, mediate, and resolve by outcome. It does NOT release messages to the
+// broker on failure — a retryable outcome keeps the in-flight entry and returns
+// processRetry so the caller retries in-pipeline (preserving order for grouped
+// messages). Only a terminal 2xx/4xx ACKs and clears the entry.
+func (p *Pool) processOne(ctx context.Context, qm common.QueuedMessage) (result processResult, retryAfter time.Duration) {
 	p.activeWorkers.Add(1)
 	defer p.activeWorkers.Add(^uint32(0)) // atomic decrement
 
-	// Panic isolation (Rust Drop parity): resolution (ack/nack/defer) happens
-	// after Mediate in the switch below, so a panic mid-mediation would strand
-	// the message AND crash the process (an unrecovered panic in a goroutine
-	// takes down the program). Recover, NACK for prompt redelivery, and keep
-	// the worker alive. Runs after tracker.Remove / bgDecrement (registered
-	// later, LIFO) so tracking is cleaned first; the panic window precedes
-	// resolution, so this cannot double-resolve.
+	// Panic isolation: a panic mid-mediation must not crash the process (an
+	// unrecovered panic in a goroutine takes down the program) or strand the
+	// message. Recover and retry in-pipeline — the in-flight entry is kept, so
+	// the redelivery dedup stays intact and the worker survives. Named returns
+	// let the deferred recover set the verdict.
 	defer func() {
 		if r := recover(); r != nil {
-			slog.Error("panic in processOne; NACKing for redelivery",
+			slog.Error("panic in processOne; retrying in-pipeline",
 				"msg", qm.Message.ID, "panic", r)
-			p.nackMsg(ctx, qm, ptrU32(10), "panic during processing")
+			result = processRetry
+			retryAfter = panicRetryDelay
+			if p.tracker != nil {
+				p.tracker.MarkRetrying(qm.Message.ID, qm.BrokerMessageID)
+			}
 		}
 	}()
 
-	// Batch+group FIFO cascade: this delivery was counted at enqueue, so
-	// release its slot on every exit path. Mirrors Rust's post-process
-	// decrement_and_cleanup_batch_group.
-	bgKey, hasBatchGroup := p.batchKey(qm)
-	if hasBatchGroup {
-		defer p.bgDecrementAndCleanup(bgKey)
-	}
-
-	// Record in-flight (and short-circuit on duplicate redelivery).
-	var imRef *common.InFlightMessage
-	if p.tracker != nil {
+	// First dispatch records the message in-flight (and short-circuits a
+	// concurrent broker redelivery that slipped past the route-time swap). A
+	// retry re-dispatch (Attempts>0) is already tracked — keep the existing
+	// entry (which may have had its receipt handle swapped by a redelivery)
+	// and skip the insert.
+	if p.tracker != nil && qm.Attempts == 0 {
 		im := common.NewInFlightMessage(&qm.Message, qm.BrokerMessageID, qm.QueueIdentifier, qm.BatchID, qm.ReceiptHandle)
-		existing, isDuplicate := p.tracker.Insert(im)
-		if isDuplicate {
-			// Broker redelivered while we're still processing. Swap the
-			// receipt handle on the original tracker entry and return —
-			// the original goroutine still owns the work.
-			slog.Debug("duplicate redelivery; swapped receipt handle",
-				"msg", existing.MessageID, "queue", qm.QueueIdentifier)
-			return
+		if _, isDuplicate := p.tracker.Insert(im); isDuplicate {
+			slog.Debug("duplicate redelivery (process-time backstop); dropped copy",
+				"msg", qm.Message.ID, "queue", qm.QueueIdentifier)
+			return processDuplicate, 0
 		}
-		imRef = im
-		defer p.tracker.Remove(im.MessageID, im.BrokerMessageID)
 	}
-	_ = imRef // referenced via defer
 
-	// Rate limit (per-pool token bucket). Record a rate-limited event
-	// when the limiter actually held us back (current tokens exhausted).
+	// Rate limit (per-pool token bucket). Record a rate-limited event when the
+	// limiter actually held us back (current tokens exhausted).
 	if p.limiter.IsLimited() {
 		p.metrics.RecordRateLimited()
 	}
 	if err := p.limiter.Wait(ctx); err != nil {
-		// Context cancelled mid-wait — defer the message and exit.
-		p.deferMsg(ctx, qm, ptrU32(5), "rate-limit wait cancelled")
-		return
+		// Context cancelled mid-wait — keep the entry and retry in-pipeline.
+		if p.tracker != nil {
+			p.tracker.MarkRetrying(qm.Message.ID, qm.BrokerMessageID)
+		}
+		return processRetry, retryDelay(qm.Attempts, 5)
 	}
 
 	start := time.Now()
@@ -579,52 +580,48 @@ func (p *Pool) processOne(ctx context.Context, qm common.QueuedMessage, cascade 
 	switch outcome.Result {
 	case common.MediationSuccess:
 		p.metrics.RecordSuccess(durationMs)
-		p.ackMsg(ctx, qm)
+		p.ackTracked(ctx, qm)
+		return processDone, 0
 
 	case common.MediationErrorConfig:
 		// The mediator already recorded the breaker success (4xx = reachable).
-		// 4xx — ACK to avoid infinite retries. Do NOT trip the breaker.
-		// (The destination is "healthy" in the sense that it responded.)
-		// Rust counts this against total_failure (it was a non-success
-		// terminal outcome), so we do the same.
+		// 4xx — ACK to avoid an infinite client-error retry loop. Do NOT trip
+		// the breaker. Counted against total_failure (a non-success terminal).
 		p.metrics.RecordFailure(durationMs)
-		p.ackMsg(ctx, qm)
+		p.ackTracked(ctx, qm)
+		return processDone, 0
 
 	case common.MediationErrorProcess:
-		// Transient: message will be redelivered, so don't penalise
-		// the all-time failure counter. Matches Rust record_transient.
+		// Transient (5xx/timeout): retry in-pipeline. Don't penalise the
+		// all-time failure counter.
 		p.metrics.RecordTransient(durationMs)
-		// FIFO cascade (ordered only): mark the batch+group failed so the
-		// remaining ordered messages NACK.
-		if cascade && hasBatchGroup {
-			p.bgMarkFailed(bgKey)
-		}
-		p.nackMsg(ctx, qm, ptrU32(uint32(outcome.DelaySeconds)), "process error")
+		return p.retry(qm, outcome.DelaySeconds)
 
 	case common.MediationErrorConnection:
 		p.metrics.RecordFailure(durationMs)
-		// FIFO cascade (ordered only): mark the batch+group failed so the
-		// remaining ordered messages NACK.
-		if cascade && hasBatchGroup {
-			p.bgMarkFailed(bgKey)
-		}
-		p.nackMsg(ctx, qm, ptrU32(uint32(outcome.DelaySeconds)), "connection error")
+		return p.retry(qm, outcome.DelaySeconds)
 
 	case common.MediationRateLimited:
-		// 429 — defer with Retry-After; NOT a breaker failure.
+		// 429 — retry in-pipeline honouring Retry-After; NOT a breaker failure.
 		p.metrics.RecordRateLimited()
-		p.deferMsg(ctx, qm, ptrU32(uint32(outcome.DelaySeconds)), "rate limited")
+		return p.retry(qm, outcome.DelaySeconds)
 
 	case common.MediationCircuitOpen:
 		// Breaker open (decided by the mediator): no delivery was attempted.
-		// For ordered messages mark the batch+group failed to preserve FIFO,
-		// then DEFER until the breaker reset timeout elapses (carried in the
-		// outcome). 1:1 with the prior in-pool circuit-open path.
-		if cascade && hasBatchGroup {
-			p.bgMarkFailed(bgKey)
-		}
-		p.deferMsg(ctx, qm, ptrU32(uint32(outcome.DelaySeconds)), "circuit breaker open")
+		// Retry in-pipeline once the breaker reset timeout (carried in the
+		// outcome) elapses.
+		return p.retry(qm, outcome.DelaySeconds)
 	}
+	return processDone, 0
+}
+
+// retry marks the in-flight entry as retrying (so the stall detector / reaper
+// skip it) and returns the processRetry verdict with the computed backoff.
+func (p *Pool) retry(qm common.QueuedMessage, outcomeDelaySec int) (processResult, time.Duration) {
+	if p.tracker != nil {
+		p.tracker.MarkRetrying(qm.Message.ID, qm.BrokerMessageID)
+	}
+	return processRetry, retryDelay(qm.Attempts, outcomeDelaySec)
 }
 
 func ptrU32(v uint32) *uint32 { return &v }

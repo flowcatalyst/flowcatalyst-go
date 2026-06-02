@@ -8,63 +8,51 @@ import (
 	"github.com/flowcatalyst/flowcatalyst-go/internal/common"
 )
 
-func TestGroupQueueHighPriorityDrainsFirst(t *testing.T) {
+// A message group is a strict FIFO: messages drain in arrival order regardless
+// of HighPriority (which is a queue-level concern and must NOT reorder within a
+// group — doing so would defeat in-order delivery).
+func TestGroupQueueIsStrictFIFO(t *testing.T) {
 	gq := &groupQueue{}
 
 	mk := func(id string, hi bool) common.QueuedMessage {
-		return common.QueuedMessage{
-			Message: common.Message{ID: id, HighPriority: hi},
-		}
+		return common.QueuedMessage{Message: common.Message{ID: id, HighPriority: hi}}
 	}
 
-	// Interleave: regular, regular, high, regular, high.
-	in := []common.QueuedMessage{
-		mk("r1", false),
-		mk("r2", false),
-		mk("h1", true),
-		mk("r3", false),
-		mk("h2", true),
-	}
-	for _, m := range in {
-		if m.Message.HighPriority {
-			gq.highPriority = append(gq.highPriority, m)
-		} else {
-			gq.regular = append(gq.regular, m)
-		}
+	// Interleave regular and "high priority" — HighPriority must be ignored.
+	for _, m := range []common.QueuedMessage{
+		mk("a", false), mk("b", true), mk("c", false), mk("d", true),
+	} {
+		gq.msgs = append(gq.msgs, m)
 	}
 
-	// Drain order: all high-priority in FIFO order first, then regulars
-	// in FIFO order. Matches Rust pool.rs::MessageGroupHandler::dequeue.
 	var drained []string
 	for !gq.empty() {
 		m, _ := gq.pop()
 		drained = append(drained, m.Message.ID)
 	}
-	assert.Equal(t, []string{"h1", "h2", "r1", "r2", "r3"}, drained)
+	assert.Equal(t, []string{"a", "b", "c", "d"}, drained, "group drains in strict arrival order")
 }
 
 func TestGroupQueueEmptyAfterAllPopped(t *testing.T) {
 	gq := &groupQueue{}
-	gq.regular = append(gq.regular, common.QueuedMessage{Message: common.Message{ID: "r1"}})
+	gq.msgs = append(gq.msgs, common.QueuedMessage{Message: common.Message{ID: "r1"}})
 	assert.False(t, gq.empty())
 	_, empty := gq.pop()
 	assert.True(t, empty)
 	assert.True(t, gq.empty())
 }
 
-func TestPoolEnqueueRoutesByPriority(t *testing.T) {
+func TestPoolEnqueueAppendsToBackEnqueueFrontPrepends(t *testing.T) {
 	p := &Pool{groupQs: map[string]*groupQueue{}}
-	p.enqueue("g1", common.QueuedMessage{Message: common.Message{ID: "r1", HighPriority: false}})
-	p.enqueue("g1", common.QueuedMessage{Message: common.Message{ID: "h1", HighPriority: true}})
-	p.enqueue("g2", common.QueuedMessage{Message: common.Message{ID: "h2", HighPriority: true}})
+	p.enqueue("g1", common.QueuedMessage{Message: common.Message{ID: "m1"}})
+	p.enqueue("g1", common.QueuedMessage{Message: common.Message{ID: "m2"}})
+	// A retry re-inserts at the front so it is attempted before m1/m2.
+	p.enqueueFront("g1", common.QueuedMessage{Message: common.Message{ID: "retry"}})
 
 	g1 := p.groupQs["g1"]
-	assert.Len(t, g1.regular, 1)
-	assert.Equal(t, "r1", g1.regular[0].Message.ID)
-	assert.Len(t, g1.highPriority, 1)
-	assert.Equal(t, "h1", g1.highPriority[0].Message.ID)
-
-	g2 := p.groupQs["g2"]
-	assert.Empty(t, g2.regular)
-	assert.Len(t, g2.highPriority, 1)
+	got := make([]string, 0, len(g1.msgs))
+	for _, m := range g1.msgs {
+		got = append(got, m.Message.ID)
+	}
+	assert.Equal(t, []string{"retry", "m1", "m2"}, got, "enqueue → back, enqueueFront → head")
 }

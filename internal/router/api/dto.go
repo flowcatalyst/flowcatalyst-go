@@ -333,7 +333,7 @@ type PublishMessageRequest struct {
 	MediationType   string `json:"mediation_type,omitempty" doc:"Mediation type; defaults to HTTP"`
 	MediationTarget string `json:"mediation_target" doc:"Target URL"`
 	MessageGroupID  string `json:"message_group_id,omitempty" doc:"Optional FIFO group ID"`
-	HighPriority    bool   `json:"high_priority,omitempty" doc:"Drain ahead of regular messages in the same group"`
+	HighPriority    bool   `json:"high_priority,omitempty" doc:"Queue-level priority hint; does NOT reorder within a message group (groups are strict FIFO)"`
 	DispatchMode    string `json:"dispatch_mode,omitempty" doc:"IMMEDIATE | NEXT_ON_ERROR | BLOCK_ON_ERROR"`
 	AuthToken       string `json:"auth_token,omitempty"`
 	SigningSecret   string `json:"signing_secret,omitempty"`

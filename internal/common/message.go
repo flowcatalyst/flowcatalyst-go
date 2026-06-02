@@ -67,8 +67,13 @@ type QueuedMessage struct {
 	QueueIdentifier string
 	// BatchID is a router-assigned grouping over messages received in the
 	// same poll batch (Rust BatchMessage.batch_id). It is set by the pool's
-	// poll loop, not the broker, and drives batch+group FIFO cascade NACKs.
+	// poll loop, not the broker, and is informational only.
 	BatchID string
+	// Attempts counts how many in-pipeline mediation attempts this delivery
+	// has already had (0 on first dispatch). The pool increments it on each
+	// retry so it can recognise a re-dispatch (skip re-tracking) and grow the
+	// backoff. Internal-only; never crosses the wire.
+	Attempts uint
 }
 
 // InFlightMessage tracks a message currently being processed.
@@ -81,6 +86,10 @@ type InFlightMessage struct {
 	MessageGroupID  string
 	BatchID         string
 	ReceiptHandle   string
+	// Attempts is >0 once the message has failed at least once and is being
+	// retried in-pipeline. The stall detector and the in-flight reaper skip
+	// entries with Attempts>0 — they are legitimately retrying, not stuck.
+	Attempts uint
 }
 
 // NewInFlightMessage constructs a tracker.

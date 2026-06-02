@@ -99,66 +99,78 @@ func grWaitFor(t *testing.T, cond func() bool, timeout time.Duration) {
 	}
 }
 
-// --- Pool: resolution always fires on every path ---
+// --- Pool: resolution follows the in-pipeline-retry contract ---
+//
+// Terminal outcomes (2xx success, 4xx) ACK once and clear the in-flight entry.
+// Retryable outcomes (5xx/timeout, connection, 429, circuit-open, panic) DO
+// NOT touch the broker — the message is retried in-pipeline — so processOne
+// returns processRetry with a backoff and the consumer sees zero terminal
+// actions. (SQS Nack is a no-op anyway; releasing to the broker is no longer
+// part of the failure path.)
 
 func TestGuardrail_ResolutionOnSuccess(t *testing.T) {
 	c := &grConsumer{id: "q1"}
 	p := grPool(&grMediator{outcome: common.Success()}, c)
-	p.processOne(context.Background(), grMsg("evt_ok", "http://t/ok"), false)
-	if c.acks.Load() != 1 || c.nacks.Load() != 0 || c.defers.Load() != 0 {
-		t.Fatalf("success must ACK exactly once; got acks=%d nacks=%d defers=%d",
-			c.acks.Load(), c.nacks.Load(), c.defers.Load())
+	res, _ := p.processOne(context.Background(), grMsg("evt_ok", "http://t/ok"))
+	if res != processDone || c.acks.Load() != 1 || c.nacks.Load() != 0 || c.defers.Load() != 0 {
+		t.Fatalf("success must ACK exactly once and report processDone; got res=%d acks=%d nacks=%d defers=%d",
+			res, c.acks.Load(), c.nacks.Load(), c.defers.Load())
 	}
 }
 
-func TestGuardrail_ResolutionOnProcessError(t *testing.T) {
+func TestGuardrail_RetryOnProcessError(t *testing.T) {
 	c := &grConsumer{id: "q1"}
 	p := grPool(&grMediator{outcome: common.ErrorProcess(30, "5xx")}, c)
-	p.processOne(context.Background(), grMsg("evt_5xx", "http://t/5xx"), false)
-	if c.nacks.Load() != 1 {
-		t.Fatalf("process error must NACK exactly once; got nacks=%d", c.nacks.Load())
+	res, delay := p.processOne(context.Background(), grMsg("evt_5xx", "http://t/5xx"))
+	if res != processRetry {
+		t.Fatalf("process error must retry in-pipeline; got res=%d", res)
 	}
-	if d := c.lastNackDelay.Load(); d == nil || *d != 30 {
-		t.Fatalf("process error NACK delay must be 30; got %v", d)
+	if c.total() != 0 {
+		t.Fatalf("process error must NOT touch the broker (in-pipeline retry); got %d terminal actions", c.total())
+	}
+	if delay < 30*time.Second {
+		t.Fatalf("process-error backoff must honour the 30s retry-after floor; got %v", delay)
 	}
 }
 
-func TestGuardrail_ResolutionOnCircuitOpen(t *testing.T) {
-	// The mediator now owns the breaker and returns MediationCircuitOpen when
-	// open; the pool must DEFER (not NACK, not ACK) such a message.
+func TestGuardrail_RetryOnCircuitOpen(t *testing.T) {
+	// The mediator owns the breaker and returns MediationCircuitOpen when open;
+	// the pool must retry in-pipeline (no broker action) after the reset delay.
 	c := &grConsumer{id: "q1"}
 	p := grPool(&grMediator{outcome: common.CircuitOpen(5)}, c)
-	p.processOne(context.Background(), grMsg("evt_cb", "http://t/cb"), false)
-	if c.defers.Load() != 1 || c.nacks.Load() != 0 || c.acks.Load() != 0 {
-		t.Fatalf("circuit-open must DEFER exactly once; got acks=%d nacks=%d defers=%d",
-			c.acks.Load(), c.nacks.Load(), c.defers.Load())
+	res, delay := p.processOne(context.Background(), grMsg("evt_cb", "http://t/cb"))
+	if res != processRetry || c.total() != 0 {
+		t.Fatalf("circuit-open must retry in-pipeline with no broker action; got res=%d terminal=%d",
+			res, c.total())
+	}
+	if delay < 5*time.Second {
+		t.Fatalf("circuit-open backoff must honour the 5s reset floor; got %v", delay)
 	}
 }
 
-func TestGuardrail_ResolutionOnPanic(t *testing.T) {
-	// Even on a panic mid-mediation the message must be resolved (NACK) and the
-	// worker must not crash the process. processOne is invoked synchronously and
-	// we recover at the call site so a regression reports a clean failure rather
-	// than aborting the run.
+func TestGuardrail_RetryOnPanic(t *testing.T) {
+	// A panic mid-mediation must be recovered, NOT crash the process, and be
+	// retried in-pipeline (the in-flight entry is kept) — processOne recovers
+	// internally and returns processRetry with no broker action.
 	c := &grConsumer{id: "q1"}
 	p := grPool(&grMediator{panicMsg: "boom"}, c)
-	func() {
-		defer func() { _ = recover() }()
-		p.processOne(context.Background(), grMsg("evt_panic", "http://t/panic"), false)
-	}()
-	if c.total() != 1 {
-		t.Fatalf("a panic mid-mediation must still resolve the message (NACK); got %d resolutions", c.total())
+	res, _ := p.processOne(context.Background(), grMsg("evt_panic", "http://t/panic"))
+	if res != processRetry {
+		t.Fatalf("a panic mid-mediation must be recovered and retried in-pipeline; got res=%d", res)
+	}
+	if c.total() != 0 {
+		t.Fatalf("a recovered panic must not produce a terminal broker action; got %d", c.total())
 	}
 }
 
 // --- Pool (marquee): the data-race surface under contention ---
 
 // Hammer submit() from many goroutines across both dispatch paths (IMMEDIATE
-// goroutine-per-message + ordered per-group drainers) and overlapping batch
-// groups. Exercises groupQs (p.mu), the batch-group maps (bgMu), the swappable
-// semaphore and the atomic counters concurrently. Under -race, any future edit
-// that drops a lock fails here (or panics on concurrent map write). Invariant:
-// every submitted message is resolved exactly once (no loss, no double-resolve).
+// goroutine-per-message + ordered per-group drainers) and overlapping groups.
+// Exercises groupQs (p.mu), the swappable semaphore and the atomic counters
+// concurrently. Under -race, any future edit that drops a lock fails here (or
+// panics on concurrent map write). All messages succeed here, so the invariant
+// is: every submitted message is ACKed exactly once (no loss, no double-ack).
 func TestGuardrail_ConcurrentSubmitNoRaceAndResolvesEach(t *testing.T) {
 	const n = 600
 	c := &grConsumer{id: "q1"}
