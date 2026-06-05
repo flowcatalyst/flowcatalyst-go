@@ -22,6 +22,12 @@ type UpdateCommand struct {
 	RequiredOIDCTenantID *string  `json:"requiredOidcTenantId,omitempty"`
 	AllowedRoleIDs       []string `json:"allowedRoleIds,omitempty"`
 	SyncRolesFromIDP     *bool    `json:"syncRolesFromIdp,omitempty"`
+	// 2FA fields: nil pointer = unchanged; a non-nil Allowed2FAMethods slice
+	// (incl. empty) replaces the set.
+	Require2FA            *bool    `json:"require2fa,omitempty"`
+	Allowed2FAMethods     []string `json:"allowed2faMethods,omitempty"`
+	RememberDeviceEnabled *bool    `json:"rememberDeviceEnabled,omitempty"`
+	RememberDeviceDays    *int     `json:"rememberDeviceDays,omitempty"`
 }
 
 // UpdateMapping mutates an existing mapping and emits
@@ -66,6 +72,22 @@ func UpdateMapping(
 	}
 	if cmd.SyncRolesFromIDP != nil {
 		e.SyncRolesFromIDP = *cmd.SyncRolesFromIDP
+	}
+	if cmd.Require2FA != nil {
+		e.Require2FA = *cmd.Require2FA
+	}
+	if cmd.Allowed2FAMethods != nil {
+		e.Allowed2FAMethods = cmd.Allowed2FAMethods
+	}
+	if cmd.RememberDeviceEnabled != nil {
+		e.RememberDeviceEnabled = *cmd.RememberDeviceEnabled
+	}
+	if cmd.RememberDeviceDays != nil {
+		e.RememberDeviceDays = *cmd.RememberDeviceDays
+	}
+	// Validate the resulting 2FA state (require2fa ⇒ ≥1 valid method).
+	if err := validate2FA(e.Require2FA, e.Allowed2FAMethods); err != nil {
+		return zero, err
 	}
 
 	event := EmailDomainMappingUpdated{

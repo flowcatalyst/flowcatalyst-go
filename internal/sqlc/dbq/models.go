@@ -123,6 +123,26 @@ type IamLoginAttempt struct {
 	AttemptedAt   time.Time
 }
 
+type IamMfaEmailPin struct {
+	ID          string
+	PrincipalID string
+	Purpose     string
+	PinHash     string
+	Attempts    int32
+	ExpiresAt   time.Time
+	CreatedAt   time.Time
+}
+
+type IamMfaTrustedDevice struct {
+	ID          string
+	PrincipalID string
+	TokenHash   string
+	Label       *string
+	ExpiresAt   time.Time
+	CreatedAt   time.Time
+	LastUsedAt  *time.Time
+}
+
 type IamOidcLoginState struct {
 	State                    string
 	EmailDomain              string
@@ -147,6 +167,8 @@ type IamPasswordResetToken struct {
 	TokenHash   string
 	ExpiresAt   time.Time
 	CreatedAt   time.Time
+	Purpose     string
+	Reset2fa    bool
 }
 
 type IamPermission struct {
@@ -252,6 +274,24 @@ type IamServiceAccount struct {
 	LastUsedAt                 *time.Time
 	CreatedAt                  time.Time
 	UpdatedAt                  time.Time
+}
+
+type IamUserMfaMethod struct {
+	ID              string
+	PrincipalID     string
+	Method          string
+	SecretEncrypted *string
+	ConfirmedAt     *time.Time
+	LastUsedAt      *time.Time
+	CreatedAt       time.Time
+}
+
+type IamUserMfaRecoveryCode struct {
+	ID          string
+	PrincipalID string
+	CodeHash    string
+	UsedAt      *time.Time
+	CreatedAt   time.Time
 }
 
 type MsgConnection struct {
@@ -724,15 +764,24 @@ type TntCorsAllowedOrigin struct {
 }
 
 type TntEmailDomainMapping struct {
-	ID                   string
-	EmailDomain          string
-	IdentityProviderID   string
-	ScopeType            string
-	PrimaryClientID      *string
-	RequiredOidcTenantID *string
-	SyncRolesFromIdp     bool
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
+	ID                    string
+	EmailDomain           string
+	IdentityProviderID    string
+	ScopeType             string
+	PrimaryClientID       *string
+	RequiredOidcTenantID  *string
+	SyncRolesFromIdp      bool
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
+	Require2fa            bool
+	RememberDeviceEnabled bool
+	RememberDeviceDays    int32
+}
+
+type TntEmailDomainMapping2faMethod struct {
+	ID                   int32
+	EmailDomainMappingID string
+	Method               string
 }
 
 type TntEmailDomainMappingAdditionalClient struct {

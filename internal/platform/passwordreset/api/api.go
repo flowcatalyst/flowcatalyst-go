@@ -18,6 +18,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/mfatoken"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/twofa"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/mfa"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/notify"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/passwordreset"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/principal"
 	principalops "github.com/flowcatalyst/flowcatalyst-go/internal/platform/principal/operations"
@@ -30,12 +34,17 @@ import (
 // resetTokenTTL is the single-use token lifetime. 1:1 with Rust (15 min).
 const resetTokenTTL = 15 * time.Minute
 
+// inviteTokenTTL is the first-time "set your password" lifetime — longer than a
+// reset so a newly-invited user has time to act on the email.
+const inviteTokenTTL = 72 * time.Hour
+
 // Emailer delivers the reset link to the user. Optional: when nil the token is
 // still created and stored (best-effort delivery, mirroring Rust's "email
 // failure is logged not propagated"). Use NewEmailer to build one from an
 // email.Service (wired in WirePlatform from the SMTP_* env).
 type Emailer interface {
 	SendResetLink(ctx context.Context, to, resetLink string) error
+	SendInviteLink(ctx context.Context, to, inviteLink string) error
 }
 
 // linkEmailer wraps an email.Service and renders the reset-link email. The
@@ -56,6 +65,18 @@ func (e linkEmailer) SendResetLink(ctx context.Context, to, resetLink string) er
 	})
 }
 
+func (e linkEmailer) SendInviteLink(ctx context.Context, to, inviteLink string) error {
+	return e.svc.Send(ctx, email.Message{
+		To:      to,
+		Subject: "Set your password",
+		HTMLBody: "<p>An account has been created for you on FlowCatalyst.</p>" +
+			"<p><a href=\"" + inviteLink + "\">Click here to set your password</a></p>" +
+			"<p>If two-factor authentication is required for your organisation, " +
+			"you'll be guided through setting it up.</p>" +
+			"<p>This link expires in 72 hours.</p>",
+	})
+}
+
 // principalEmailer mints a reset token for a principal and emails the link. It
 // implements principal/operations.PasswordResetEmailer, powering the admin
 // trigger POST /api/principals/{id}/send-password-reset. Lives here so it can
@@ -73,7 +94,8 @@ func NewPrincipalEmailer(tokens *passwordreset.Repository, baseURL string, svc e
 }
 
 // SendResetEmail creates a fresh single-use token for p and emails the link.
-func (e *principalEmailer) SendResetEmail(ctx context.Context, p *principal.Principal) error {
+// reset2FA flags the token to also clear the user's 2FA on confirm.
+func (e *principalEmailer) SendResetEmail(ctx context.Context, p *principal.Principal, reset2FA bool) error {
 	if p == nil || p.UserIdentity == nil || strings.TrimSpace(p.UserIdentity.Email) == "" {
 		return nil
 	}
@@ -85,11 +107,35 @@ func (e *principalEmailer) SendResetEmail(ctx context.Context, p *principal.Prin
 		return err
 	}
 	tok := passwordreset.New(p.ID, hashToken(raw), time.Now().UTC().Add(resetTokenTTL))
+	tok.Reset2FA = reset2FA
 	if err := e.tokens.Insert(ctx, tok); err != nil {
 		return err
 	}
 	link := strings.TrimRight(e.base, "/") + "/auth/reset-password?token=" + raw
 	return e.mail.SendResetLink(ctx, p.UserIdentity.Email, link)
+}
+
+// SendInvite mints a longer-lived invite token and emails a "set your password"
+// link to a newly-created internal user. Same set-password page as reset, so
+// the confirm flow (and its 2FA enrollment gate) is shared.
+func (e *principalEmailer) SendInvite(ctx context.Context, p *principal.Principal) error {
+	if p == nil || p.UserIdentity == nil || strings.TrimSpace(p.UserIdentity.Email) == "" {
+		return nil
+	}
+	if err := e.tokens.DeleteByPrincipalID(ctx, p.ID); err != nil {
+		return err
+	}
+	raw, err := generateRawToken()
+	if err != nil {
+		return err
+	}
+	tok := passwordreset.New(p.ID, hashToken(raw), time.Now().UTC().Add(inviteTokenTTL))
+	tok.Purpose = passwordreset.PurposeInvite
+	if err := e.tokens.Insert(ctx, tok); err != nil {
+		return err
+	}
+	link := strings.TrimRight(e.base, "/") + "/auth/reset-password?token=" + raw
+	return e.mail.SendInviteLink(ctx, p.UserIdentity.Email, link)
 }
 
 // State holds the deps the password-reset handlers reach into.
@@ -99,6 +145,22 @@ type State struct {
 	UoW             *usecasepgx.UnitOfWork
 	ExternalBaseURL string  // base for the reset link (e.g. cfg.JWTIssuer)
 	Emailer         Emailer // optional; nil = no delivery
+
+	// 2FA integration (all optional). When MFA + MFATokens are wired, the
+	// confirm step clears 2FA on a reset_2fa token, revokes remembered devices,
+	// and returns enrollment_required when the domain compels a second factor.
+	MFA            *mfa.Service
+	MFATokens      *mfatoken.Issuer
+	Policy         twofa.Policy
+	Notifier       *notify.Notifier
+	EnrollTokenTTL time.Duration // default 30m
+}
+
+func (s *State) enrollTTL() time.Duration {
+	if s.EnrollTokenTTL > 0 {
+		return s.EnrollTokenTTL
+	}
+	return 30 * time.Minute
 }
 
 // RegisterRoutes mounts the three unauthenticated endpoints. Mount OUTSIDE the
@@ -243,7 +305,81 @@ func (s *State) confirmReset(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("failed to clear consumed reset tokens", "principal", t.PrincipalID, "err", err)
 	}
 	slog.Info("password reset completed", "principal", t.PrincipalID)
-	writeJSON(w, http.StatusOK, messageResponse{Message: "Password reset successfully."})
+
+	// Post-reset side effects (best-effort) + the 2FA enrollment gate.
+	resp := s.postResetTwoFactor(r.Context(), t)
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// confirmResponse is the confirm body, extended with the optional 2FA
+// enrollment hand-off. status is "ok" or "enrollment_required".
+type confirmResponse struct {
+	Status         string   `json:"status"`
+	Message        string   `json:"message"`
+	EnrollToken    string   `json:"enrollToken,omitempty"`
+	AllowedMethods []string `json:"allowedMethods,omitempty"`
+}
+
+// postResetTwoFactor runs the after-reset security side effects — optional 2FA
+// clear (reset_2fa tokens), trusted-device revocation, the password-changed
+// notification — then decides whether the user must now enroll a second factor.
+func (s *State) postResetTwoFactor(ctx context.Context, t *passwordreset.Token) confirmResponse {
+	ok := confirmResponse{Status: "ok", Message: "Password reset successfully."}
+
+	p, err := s.Principals.FindByID(ctx, t.PrincipalID)
+	if err != nil || p == nil {
+		return ok
+	}
+	emailAddr := ""
+	if p.UserIdentity != nil {
+		emailAddr = p.UserIdentity.Email
+	}
+
+	if s.MFA != nil {
+		// reset_2fa tokens clear all enrolled factors → forces re-enrollment.
+		if t.Reset2FA {
+			if err := s.MFA.ResetAll(ctx, p.ID); err != nil {
+				slog.Warn("2FA reset during password reset failed", "principal", p.ID, "err", err)
+			} else {
+				s.Notifier.TwoFactorReset(ctx, emailAddr)
+			}
+		}
+		// Any password change invalidates remembered devices (hygiene).
+		if err := s.MFA.RevokeAllTrustedDevices(ctx, p.ID); err != nil {
+			slog.Warn("revoke trusted devices failed", "principal", p.ID, "err", err)
+		}
+	}
+	s.Notifier.PasswordChanged(ctx, emailAddr)
+
+	// Enrollment gate: an internal 2FA-required user who isn't enrolled must set
+	// up a factor before they can sign in — hand back an enroll token so the SPA
+	// goes straight into setup.
+	if s.MFA == nil || s.MFATokens == nil {
+		return ok
+	}
+	ev := s.Policy.Evaluate(ctx, emailAddr)
+	if !ev.Requires2FA() {
+		return ok
+	}
+	enrolled, err := s.MFA.HasConfirmedMethod(ctx, p.ID)
+	if err != nil {
+		slog.Warn("2FA enrollment check failed", "principal", p.ID, "err", err)
+		return ok
+	}
+	if enrolled {
+		return ok
+	}
+	tok, err := s.MFATokens.Mint(p.ID, mfatoken.PurposeEnroll, s.enrollTTL())
+	if err != nil {
+		slog.Error("mint enroll token failed", "principal", p.ID, "err", err)
+		return ok
+	}
+	return confirmResponse{
+		Status:         "enrollment_required",
+		Message:        "Password set. Set up two-factor authentication to finish.",
+		EnrollToken:    tok,
+		AllowedMethods: ev.AllowedMethods(),
+	}
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────

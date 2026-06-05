@@ -24,6 +24,7 @@ import (
 	gowebauthn "github.com/go-webauthn/webauthn/webauthn"
 
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/provider"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/notify"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/principal"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/shared/auth"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/shared/httperror"
@@ -54,6 +55,9 @@ type State struct {
 	// SessionTTL is the session cookie lifetime. Defaults to 24h when zero
 	// (matches login.SessionTTL).
 	SessionTTL time.Duration
+	// Notifier (optional) sends the best-effort "a new passkey was registered"
+	// security email after a successful registration.
+	Notifier *notify.Notifier
 }
 
 const tag = "webauthn"
@@ -208,6 +212,9 @@ func (s *State) registerComplete(ctx context.Context, in *registerCompleteInput)
 		operations.RegisterCommand{StateID: in.Body.StateID, Response: *cred, Name: in.Body.Name}, ec)
 	if err != nil {
 		return nil, err
+	}
+	if p.UserIdentity != nil {
+		s.Notifier.NewPasskey(ctx, p.UserIdentity.Email)
 	}
 	return &registerCompleteOutput{Body: RegisterCompleteResponse{CredentialID: committed.Event().CredentialID}}, nil
 }

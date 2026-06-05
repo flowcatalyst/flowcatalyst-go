@@ -23,15 +23,19 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/audit"
 	platformauth "github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/authservice"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/grantstore"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/loginbackoff"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/mfatoken"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/passwordhash"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/provider"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/emaildomainmapping"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/identityprovider"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/loginattempt"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/mfa"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/notify"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/principal"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/shared/auth"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/shared/httperror"
@@ -65,6 +69,25 @@ type Config struct {
 	LoginAttempts *loginattempt.Repository
 	// BackoffPolicy tunes the failed-login backoff/ceiling.
 	BackoffPolicy loginbackoff.Policy
+
+	// MFA + MFATokens back the 2FA flow. When MFA or MFATokens is nil the
+	// /auth/2fa/* routes are not mounted and login never challenges (2FA
+	// disabled). A passkey does NOT exempt the password path: a passkey user
+	// who chooses to sign in with a password must still complete 2FA — so the
+	// webauthn repo plays no part here (passkey LOGIN bypasses 2FA on its own
+	// route).
+	MFA       *mfa.Service
+	MFATokens *mfatoken.Issuer
+	// Notifier sends best-effort 2FA security emails (enrolled, recovery codes,
+	// trusted device). Optional — nil is a safe no-op.
+	Notifier *notify.Notifier
+	// Audit (optional) records 2FA state changes (enroll / remove / regenerate)
+	// to the audit trail. Challenge success/failure is already in login attempts.
+	Audit *audit.Repository
+	// PendingTokenTTL / EnrollTokenTTL bound the short-lived between-step
+	// tokens. Zero falls back to defaults (10m / 30m).
+	PendingTokenTTL time.Duration
+	EnrollTokenTTL  time.Duration
 }
 
 // Endpoint is the bag of HTTP handlers.
@@ -100,6 +123,8 @@ func (e *Endpoint) RegisterPublicRoutes(r chi.Router) {
 	r.Get("/auth/check-domain", e.handleCheckDomainQuery)
 	r.Post("/auth/login", e.handleLogin)
 	r.Post("/auth/logout", e.handleLogout)
+	// 2FA challenge + enrollment endpoints (no-op when MFA isn't wired).
+	e.RegisterTwoFactorRoutes(r)
 	// /auth/refresh rotates a refresh token without an existing session, so
 	// it lives on the public router. Only mounted when its deps are wired.
 	if e.cfg.RefreshTokens != nil && e.cfg.Auth != nil {
@@ -112,6 +137,8 @@ func (e *Endpoint) RegisterPublicRoutes(r chi.Router) {
 // so the AuthContext is populated by the time handleMe runs.
 func (e *Endpoint) RegisterAuthenticatedRoutes(r chi.Router) {
 	r.Get("/auth/me", e.handleMe)
+	// Session-gated 2FA self-service (Profile screen). No-op when MFA unwired.
+	e.RegisterTwoFactorSelfServiceRoutes(r)
 }
 
 // ── /auth/check-domain ───────────────────────────────────────────────────
@@ -309,12 +336,18 @@ type loginRequest struct {
 // auth port: include the flattened permission set so the SPA's
 // permission store + router guards have what they need at sign-in.
 type loginResponse struct {
+	// Status is "ok" for a completed login. The 2FA-pending responses use
+	// twoFactorResponse with status "mfa_required" / "enrollment_required".
+	Status      string   `json:"status"`
 	PrincipalID string   `json:"principalId"`
 	Name        string   `json:"name"`
 	Email       string   `json:"email"`
 	Roles       []string `json:"roles"`
 	Permissions []string `json:"permissions"`
 	ClientID    *string  `json:"clientId"`
+	// RecoveryCodes is populated only by the enroll-and-complete path, the one
+	// time a freshly-generated backup-code set is returned to the user.
+	RecoveryCodes []string `json:"recoveryCodes,omitempty"`
 }
 
 // buildPermissionList flattens the principal's roles into the permission
@@ -397,12 +430,42 @@ func (e *Endpoint) handleLogin(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("email lowercase self-heal failed; login continues", "principal", p.ID, "err", herr)
 	}
 
+	// Second-factor gate. When MFA is wired and applies to this user, return a
+	// pending/enrollment challenge instead of a session — the /auth/2fa/* flow
+	// then completes the login (and records the success). We fail CLOSED: an
+	// evaluation error denies rather than silently bypassing 2FA.
+	if e.cfg.MFA != nil && e.cfg.MFATokens != nil {
+		handled, err := e.maybeChallenge2FA(w, r, p)
+		if err != nil {
+			slog.Error("2FA evaluation failed; denying login", "principal", p.ID, "err", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"code":    "MFA_EVAL_FAILED",
+				"message": "could not evaluate two-factor requirement",
+			})
+			return
+		}
+		if handled {
+			return
+		}
+	}
+
+	e.completeLogin(w, r, p, nil)
+}
+
+// completeLogin mints the session cookie, records the successful attempt, and
+// writes the OK login payload. recoveryCodes is non-nil only on the
+// enroll-and-complete path (the one time a fresh backup-code set is surfaced).
+// Shared by handleLogin and the 2FA verify / enroll-confirm handlers.
+func (e *Endpoint) completeLogin(w http.ResponseWriter, r *http.Request, p *principal.Principal, recoveryCodes []string) {
+	email := ""
+	if p.UserIdentity != nil {
+		email = p.UserIdentity.Email
+	}
 	token, err := e.cfg.Provider.MintSessionToken(r.Context(), p.ID, SessionTTL)
 	if err != nil {
 		httperror.Write(w, httperror.BadRequest("MINT_FAILED", err.Error()))
 		return
 	}
-
 	http.SetCookie(w, &http.Cookie{
 		Name:     platformmw.SessionCookieName,
 		Value:    token,
@@ -413,9 +476,7 @@ func (e *Endpoint) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Expires:  time.Now().Add(SessionTTL),
 		MaxAge:   int(SessionTTL.Seconds()),
 	})
-
-	e.recordAttempt(r.Context(), loginattempt.OutcomeSuccess, email, &p.ID, ip, "")
-
+	e.recordAttempt(r.Context(), loginattempt.OutcomeSuccess, email, &p.ID, clientIP(r), "")
 	claims, err := e.cfg.Provider.ResolveClaims(r.Context(), p.ID)
 	if err != nil {
 		// Auth succeeded but we couldn't load roles/permissions — log
@@ -428,12 +489,14 @@ func (e *Endpoint) handleLogin(w http.ResponseWriter, r *http.Request) {
 		roles = append(roles, ra.Role)
 	}
 	writeJSON(w, http.StatusOK, loginResponse{
-		PrincipalID: p.ID,
-		Name:        p.Name,
-		Email:       email,
-		Roles:       roles,
-		Permissions: buildPermissionList(claims),
-		ClientID:    p.ClientID,
+		Status:        "ok",
+		PrincipalID:   p.ID,
+		Name:          p.Name,
+		Email:         email,
+		Roles:         roles,
+		Permissions:   buildPermissionList(claims),
+		ClientID:      p.ClientID,
+		RecoveryCodes: recoveryCodes,
 	})
 }
 

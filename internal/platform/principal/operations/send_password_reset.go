@@ -19,12 +19,17 @@ import (
 // platform's mailer config is ready; until then the endpoint surfaces
 // the same "not configured" error Rust does.
 type PasswordResetEmailer interface {
-	SendResetEmail(ctx context.Context, p *principal.Principal) error
+	// SendResetEmail mints a reset token and emails the link. reset2FA, when
+	// true, flags the token to also clear the user's enrolled 2FA on confirm.
+	SendResetEmail(ctx context.Context, p *principal.Principal, reset2FA bool) error
 }
 
 // SendPasswordResetCommand triggers an admin-side reset email.
 type SendPasswordResetCommand struct {
 	ID string `json:"id"`
+	// Reset2FA also clears the user's enrolled second factors when they
+	// complete the reset (lost-device recovery).
+	Reset2FA bool `json:"reset2fa"`
 }
 
 // SendPasswordReset validates that `id` is a user principal eligible
@@ -64,7 +69,7 @@ func SendPasswordReset(
 		return usecase.Validation("NO_EMAIL", "User does not have an email address on file")
 	}
 
-	if err := emailer.SendResetEmail(ctx, p); err != nil {
+	if err := emailer.SendResetEmail(ctx, p, cmd.Reset2FA); err != nil {
 		return usecase.Internal("EMAILER", "send_reset_email failed", err)
 	}
 	return nil

@@ -1,6 +1,7 @@
 import { useAuthStore, type User } from "@/stores/auth";
 import router from "@/router";
 import { getErrorMessage } from "@/utils/errors";
+import type { TwoFactorMethod } from "./twofactor";
 
 // Auth endpoints are at /auth/* (not /api/auth/*)
 const AUTH_URL = "/auth";
@@ -18,6 +19,34 @@ interface LoginResponse {
 	permissions?: string[];
 	clientId: string | null;
 }
+
+// RawLoginResponse is the on-the-wire shape of /auth/login and the 2FA
+// completion endpoints (verify / enroll-confirm): an "ok" payload carries the
+// principal; the pending statuses carry a token + method list instead.
+export interface RawLoginResponse extends Partial<LoginResponse> {
+	status?: "ok" | "mfa_required" | "enrollment_required";
+	mfaToken?: string;
+	enrollToken?: string;
+	methods?: TwoFactorMethod[];
+	allowedMethods?: TwoFactorMethod[];
+	rememberDeviceAllowed?: boolean;
+	recoveryCodes?: string[];
+}
+
+// LoginResult is what the SPA branches on after a password submit.
+export type LoginResult =
+	| { status: "ok" }
+	| {
+			status: "mfa_required";
+			mfaToken: string;
+			methods: TwoFactorMethod[];
+			rememberDeviceAllowed: boolean;
+	  }
+	| {
+			status: "enrollment_required";
+			enrollToken: string;
+			allowedMethods: TwoFactorMethod[];
+	  };
 
 export interface DomainCheckResponse {
 	authMethod: "internal" | "external";
@@ -78,7 +107,56 @@ export async function checkSession(): Promise<boolean> {
 	}
 }
 
-export async function login(credentials: LoginCredentials): Promise<void> {
+// setSessionUser records the authenticated user in the store (the session
+// cookie is already set server-side). It does NOT navigate — callers that need
+// to show something first (e.g. recovery codes) call redirectAfterLogin later.
+export function setSessionUser(data: RawLoginResponse): void {
+	const authStore = useAuthStore();
+	authStore.setUser(mapLoginResponseToUser(data as LoginResponse));
+}
+
+// redirectAfterLogin performs the post-login navigation: OIDC interaction,
+// OAuth authorize round-trip, or the dashboard.
+export function redirectAfterLogin(): void {
+	const urlParams = new URLSearchParams(window.location.search);
+	const interactionUid = urlParams.get("interaction");
+	if (interactionUid) {
+		window.location.href = `/oidc/interaction/${interactionUid}/login`;
+		return;
+	}
+	if (urlParams.get("oauth") === "true") {
+		const oauthParams = new URLSearchParams();
+		const oauthFields = [
+			"response_type",
+			"client_id",
+			"redirect_uri",
+			"scope",
+			"state",
+			"code_challenge",
+			"code_challenge_method",
+			"nonce",
+		];
+		for (const field of oauthFields) {
+			const value = urlParams.get(field);
+			if (value) oauthParams.set(field, value);
+		}
+		window.location.href = `/oauth/authorize?${oauthParams.toString()}`;
+		return;
+	}
+	void router.replace("/dashboard");
+}
+
+// applyLoginSuccess = set user + redirect. Used by the password and 2FA-verify
+// paths (no interstitial). The enroll-and-complete path uses setSessionUser +
+// redirectAfterLogin separately so it can show recovery codes in between.
+export function applyLoginSuccess(data: RawLoginResponse): void {
+	setSessionUser(data);
+	redirectAfterLogin();
+}
+
+export async function login(
+	credentials: LoginCredentials,
+): Promise<LoginResult> {
 	const authStore = useAuthStore();
 	authStore.setLoading(true);
 	authStore.setError(null);
@@ -94,45 +172,35 @@ export async function login(credentials: LoginCredentials): Promise<void> {
 		if (!response.ok) {
 			const errorData = await response.json().catch(() => ({}));
 			throw new Error(
-				errorData.error || "Login failed. Please check your credentials.",
+				errorData.message ||
+					errorData.error ||
+					"Login failed. Please check your credentials.",
 			);
 		}
 
-		const data: LoginResponse = await response.json();
-		authStore.setUser(mapLoginResponseToUser(data));
+		const data: RawLoginResponse = await response.json();
 
-		// Check if this is part of an OIDC interaction flow
-		const urlParams = new URLSearchParams(window.location.search);
-		const interactionUid = urlParams.get("interaction");
-		if (interactionUid) {
-			window.location.href = `/oidc/interaction/${interactionUid}/login`;
-			return;
+		// 2FA pending: no session yet — hand the token back to the caller.
+		if (data.status === "mfa_required") {
+			authStore.setLoading(false);
+			return {
+				status: "mfa_required",
+				mfaToken: data.mfaToken ?? "",
+				methods: data.methods ?? [],
+				rememberDeviceAllowed: data.rememberDeviceAllowed ?? false,
+			};
+		}
+		if (data.status === "enrollment_required") {
+			authStore.setLoading(false);
+			return {
+				status: "enrollment_required",
+				enrollToken: data.enrollToken ?? "",
+				allowedMethods: data.allowedMethods ?? [],
+			};
 		}
 
-		// Check if this is part of an OAuth flow - redirect back to /oauth/authorize
-		if (urlParams.get("oauth") === "true") {
-			// Rebuild OAuth authorize URL with all params
-			const oauthParams = new URLSearchParams();
-			const oauthFields = [
-				"response_type",
-				"client_id",
-				"redirect_uri",
-				"scope",
-				"state",
-				"code_challenge",
-				"code_challenge_method",
-				"nonce",
-			];
-			for (const field of oauthFields) {
-				const value = urlParams.get(field);
-				if (value) oauthParams.set(field, value);
-			}
-			window.location.href = `/oauth/authorize?${oauthParams.toString()}`;
-			return;
-		}
-
-		// Normal login - go to dashboard
-		await router.replace("/dashboard");
+		applyLoginSuccess(data);
+		return { status: "ok" };
 	} catch (error: unknown) {
 		authStore.setLoading(false);
 		authStore.setError(getErrorMessage(error, "Login failed"));
@@ -188,10 +256,17 @@ export async function validateResetToken(
 	return response.json();
 }
 
+export interface ConfirmPasswordResetResult {
+	status: "ok" | "enrollment_required";
+	message: string;
+	enrollToken?: string;
+	allowedMethods?: TwoFactorMethod[];
+}
+
 export async function confirmPasswordReset(
 	token: string,
 	password: string,
-): Promise<void> {
+): Promise<ConfirmPasswordResetResult> {
 	const response = await fetch(`${AUTH_URL}/password-reset/confirm`, {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
@@ -201,10 +276,10 @@ export async function confirmPasswordReset(
 
 	if (!response.ok) {
 		const errorData = await response.json().catch(() => ({}));
-		throw new Error(
-			errorData.error || "Failed to reset password.",
-		);
+		throw new Error(errorData.message || errorData.error || "Failed to reset password.");
 	}
+
+	return response.json();
 }
 
 export async function switchClient(clientId: string): Promise<void> {

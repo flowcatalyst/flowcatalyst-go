@@ -62,6 +62,13 @@ const (
 	Process
 	OAuthAccessToken
 	OAuthRefreshToken
+	// 2FA / MFA entities. Go-only (not present in the Rust EntityType) —
+	// they back a net-new feature. Appended at the end so existing prefixes
+	// keep their iota positions. See docs/2fa-implementation-plan.md.
+	MfaMethod
+	MfaRecoveryCode
+	MfaEmailPin
+	MfaTrustedDevice
 )
 
 // Prefix returns the 3-character prefix for this entity type. Mirrors
@@ -144,6 +151,14 @@ func (e EntityType) Prefix() string {
 		return "oat"
 	case OAuthRefreshToken:
 		return "ort"
+	case MfaMethod:
+		return "mfm"
+	case MfaRecoveryCode:
+		return "mrc"
+	case MfaEmailPin:
+		return "mep"
+	case MfaTrustedDevice:
+		return "mtd"
 	default:
 		return "unk"
 	}

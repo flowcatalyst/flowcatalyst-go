@@ -30,6 +30,26 @@ func ParseScopeType(s string) ScopeType {
 	}
 }
 
+// MFAMethod is a second-factor mechanism a domain may permit.
+type MFAMethod string
+
+const (
+	// MFATOTP is a virtual-device authenticator (RFC 6238 TOTP).
+	MFATOTP MFAMethod = "TOTP"
+	// MFAEmailPin is a one-time numeric PIN delivered by email.
+	MFAEmailPin MFAMethod = "EMAIL_PIN"
+)
+
+// ValidMFAMethod reports whether s is a known second-factor mechanism.
+func ValidMFAMethod(s string) bool {
+	switch MFAMethod(s) {
+	case MFATOTP, MFAEmailPin:
+		return true
+	default:
+		return false
+	}
+}
+
 // EmailDomainMapping is the aggregate root.
 type EmailDomainMapping struct {
 	ID                   string    `json:"id"`
@@ -42,8 +62,17 @@ type EmailDomainMapping struct {
 	RequiredOIDCTenantID *string   `json:"requiredOidcTenantId,omitempty"`
 	AllowedRoleIDs       []string  `json:"allowedRoleIds"`
 	SyncRolesFromIDP     bool      `json:"syncRolesFromIdp"`
-	CreatedAt            time.Time `json:"createdAt"`
-	UpdatedAt            time.Time `json:"updatedAt"`
+	// 2FA enforcement (internal-auth domains only; inert for OIDC domains).
+	Require2FA bool `json:"require2fa"`
+	// Allowed2FAMethods is the set of permitted mechanisms ("TOTP",
+	// "EMAIL_PIN"). Must be non-empty when Require2FA is true.
+	Allowed2FAMethods []string `json:"allowed2faMethods"`
+	// RememberDeviceEnabled lets users skip the challenge on a remembered
+	// browser for RememberDeviceDays. Only meaningful when Require2FA.
+	RememberDeviceEnabled bool      `json:"rememberDeviceEnabled"`
+	RememberDeviceDays    int       `json:"rememberDeviceDays"`
+	CreatedAt             time.Time `json:"createdAt"`
+	UpdatedAt             time.Time `json:"updatedAt"`
 }
 
 // IDStr satisfies usecase.HasID.
@@ -60,6 +89,8 @@ func New(emailDomain, identityProviderID string, scope ScopeType) *EmailDomainMa
 		AdditionalClientIDs: []string{},
 		GrantedClientIDs:    []string{},
 		AllowedRoleIDs:      []string{},
+		Allowed2FAMethods:   []string{},
+		RememberDeviceDays:  30,
 		CreatedAt:           now,
 		UpdatedAt:           now,
 	}

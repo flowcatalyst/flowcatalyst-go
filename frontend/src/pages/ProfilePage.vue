@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useAuthStore } from "@/stores/auth";
 import PasskeysSection from "@/components/PasskeysSection.vue";
+import TwoFactorSection from "@/components/TwoFactorSection.vue";
 
 const authStore = useAuthStore();
 </script>
@@ -58,20 +59,13 @@ const authStore = useAuthStore();
       <!-- Passkeys Card -->
       <PasskeysSection />
 
+      <!-- Two-Factor Authentication Card -->
+      <TwoFactorSection />
+
       <!-- Security Card -->
       <div class="fc-card">
         <h2 class="section-title">Security</h2>
         <div class="security-info">
-          <div class="security-item">
-            <div class="security-icon">
-              <i class="pi pi-shield"></i>
-            </div>
-            <div class="security-details">
-              <h4>Two-Factor Authentication</h4>
-              <p>Add an extra layer of security to your account</p>
-            </div>
-            <Button label="Enable" outlined size="small" />
-          </div>
           <div class="security-item">
             <div class="security-icon">
               <i class="pi pi-clock"></i>

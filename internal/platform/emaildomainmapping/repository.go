@@ -66,15 +66,18 @@ func (r *Repository) FindAll(ctx context.Context) ([]EmailDomainMapping, error) 
 func (r *Repository) Persist(ctx context.Context, e *EmailDomainMapping, tx *usecasepgx.DbTx) error {
 	q := r.q.WithTx(tx.Inner())
 	if err := q.EmailDomainMappingUpsert(ctx, dbq.EmailDomainMappingUpsertParams{
-		ID:                   e.ID,
-		EmailDomain:          e.EmailDomain,
-		IdentityProviderID:   e.IdentityProviderID,
-		ScopeType:            string(e.ScopeType),
-		PrimaryClientID:      e.PrimaryClientID,
-		RequiredOidcTenantID: e.RequiredOIDCTenantID,
-		SyncRolesFromIdp:     e.SyncRolesFromIDP,
-		CreatedAt:            e.CreatedAt,
-		UpdatedAt:            time.Now().UTC(),
+		ID:                    e.ID,
+		EmailDomain:           e.EmailDomain,
+		IdentityProviderID:    e.IdentityProviderID,
+		ScopeType:             string(e.ScopeType),
+		PrimaryClientID:       e.PrimaryClientID,
+		RequiredOidcTenantID:  e.RequiredOIDCTenantID,
+		SyncRolesFromIdp:      e.SyncRolesFromIDP,
+		Require2fa:            e.Require2FA,
+		RememberDeviceEnabled: e.RememberDeviceEnabled,
+		RememberDeviceDays:    int32(e.RememberDeviceDays),
+		CreatedAt:             e.CreatedAt,
+		UpdatedAt:             time.Now().UTC(),
 	}); err != nil {
 		return fmt.Errorf("edm persist: %w", err)
 	}
@@ -85,6 +88,9 @@ func (r *Repository) Persist(ctx context.Context, e *EmailDomainMapping, tx *use
 		return err
 	}
 	if err := q.EmailDomainMappingAllowedRolesClear(ctx, e.ID); err != nil {
+		return err
+	}
+	if err := q.EmailDomainMapping2FAMethodsClear(ctx, e.ID); err != nil {
 		return err
 	}
 	for _, c := range e.AdditionalClientIDs {
@@ -108,6 +114,13 @@ func (r *Repository) Persist(ctx context.Context, e *EmailDomainMapping, tx *use
 			return err
 		}
 	}
+	for _, m := range e.Allowed2FAMethods {
+		if err := q.EmailDomainMapping2FAMethodInsert(ctx, dbq.EmailDomainMapping2FAMethodInsertParams{
+			EmailDomainMappingID: e.ID, Method: m,
+		}); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -122,6 +135,9 @@ func (r *Repository) Delete(ctx context.Context, e *EmailDomainMapping, tx *usec
 		return err
 	}
 	if err := q.EmailDomainMappingAllowedRolesClear(ctx, e.ID); err != nil {
+		return err
+	}
+	if err := q.EmailDomainMapping2FAMethodsClear(ctx, e.ID); err != nil {
 		return err
 	}
 	return q.EmailDomainMappingDelete(ctx, e.ID)
@@ -158,6 +174,10 @@ func (r *Repository) hydrateAll(ctx context.Context, edms []EmailDomainMapping) 
 	if err != nil {
 		return nil, err
 	}
+	methodRows, err := r.q.EmailDomainMapping2FAMethodsForMappings(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
 
 	additionalByID := map[string][]string{}
 	for _, a := range addRows {
@@ -171,10 +191,15 @@ func (r *Repository) hydrateAll(ctx context.Context, edms []EmailDomainMapping) 
 	for _, ro := range roleRows {
 		rolesByID[ro.EmailDomainMappingID] = append(rolesByID[ro.EmailDomainMappingID], ro.RoleID)
 	}
+	methodsByID := map[string][]string{}
+	for _, m := range methodRows {
+		methodsByID[m.EmailDomainMappingID] = append(methodsByID[m.EmailDomainMappingID], m.Method)
+	}
 	for i := range edms {
 		edms[i].AdditionalClientIDs = additionalByID[edms[i].ID]
 		edms[i].GrantedClientIDs = grantedByID[edms[i].ID]
 		edms[i].AllowedRoleIDs = rolesByID[edms[i].ID]
+		edms[i].Allowed2FAMethods = methodsByID[edms[i].ID]
 		if edms[i].AdditionalClientIDs == nil {
 			edms[i].AdditionalClientIDs = []string{}
 		}
@@ -184,23 +209,30 @@ func (r *Repository) hydrateAll(ctx context.Context, edms []EmailDomainMapping) 
 		if edms[i].AllowedRoleIDs == nil {
 			edms[i].AllowedRoleIDs = []string{}
 		}
+		if edms[i].Allowed2FAMethods == nil {
+			edms[i].Allowed2FAMethods = []string{}
+		}
 	}
 	return edms, nil
 }
 
 func rowToEDM(row dbq.TntEmailDomainMapping) *EmailDomainMapping {
 	return &EmailDomainMapping{
-		ID:                   row.ID,
-		EmailDomain:          row.EmailDomain,
-		IdentityProviderID:   row.IdentityProviderID,
-		ScopeType:            ParseScopeType(row.ScopeType),
-		PrimaryClientID:      row.PrimaryClientID,
-		RequiredOIDCTenantID: row.RequiredOidcTenantID,
-		SyncRolesFromIDP:     row.SyncRolesFromIdp,
-		CreatedAt:            row.CreatedAt,
-		UpdatedAt:            row.UpdatedAt,
-		AdditionalClientIDs:  []string{},
-		GrantedClientIDs:     []string{},
-		AllowedRoleIDs:       []string{},
+		ID:                    row.ID,
+		EmailDomain:           row.EmailDomain,
+		IdentityProviderID:    row.IdentityProviderID,
+		ScopeType:             ParseScopeType(row.ScopeType),
+		PrimaryClientID:       row.PrimaryClientID,
+		RequiredOIDCTenantID:  row.RequiredOidcTenantID,
+		SyncRolesFromIDP:      row.SyncRolesFromIdp,
+		Require2FA:            row.Require2fa,
+		RememberDeviceEnabled: row.RememberDeviceEnabled,
+		RememberDeviceDays:    int(row.RememberDeviceDays),
+		CreatedAt:             row.CreatedAt,
+		UpdatedAt:             row.UpdatedAt,
+		AdditionalClientIDs:   []string{},
+		GrantedClientIDs:      []string{},
+		AllowedRoleIDs:        []string{},
+		Allowed2FAMethods:     []string{},
 	}
 }

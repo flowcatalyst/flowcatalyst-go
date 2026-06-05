@@ -2,6 +2,8 @@ import { apiFetch } from "./client";
 
 export type ScopeType = "ANCHOR" | "PARTNER" | "CLIENT";
 
+export type TwoFactorMethod = "TOTP" | "EMAIL_PIN";
+
 export interface EmailDomainMapping {
 	id: string;
 	emailDomain: string;
@@ -16,6 +18,10 @@ export interface EmailDomainMapping {
 	requiredOidcTenantId?: string;
 	allowedRoleIds: string[];
 	syncRolesFromIdp: boolean;
+	require2fa: boolean;
+	allowed2faMethods: TwoFactorMethod[];
+	rememberDeviceEnabled: boolean;
+	rememberDeviceDays: number;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -35,6 +41,10 @@ export interface CreateEmailDomainMappingRequest {
 	requiredOidcTenantId?: string;
 	allowedRoleIds?: string[];
 	syncRolesFromIdp?: boolean;
+	require2fa?: boolean;
+	allowed2faMethods?: TwoFactorMethod[];
+	rememberDeviceEnabled?: boolean;
+	rememberDeviceDays?: number;
 }
 
 export interface UpdateEmailDomainMappingRequest {
@@ -45,6 +55,10 @@ export interface UpdateEmailDomainMappingRequest {
 	requiredOidcTenantId?: string;
 	allowedRoleIds?: string[];
 	syncRolesFromIdp?: boolean;
+	require2fa?: boolean;
+	allowed2faMethods?: TwoFactorMethod[];
+	rememberDeviceEnabled?: boolean;
+	rememberDeviceDays?: number;
 }
 
 export interface EmailDomainMappingSearchParams {

@@ -102,6 +102,9 @@ type Querier interface {
 	// Queries for msg_dispatch_pools.
 	DispatchPoolFindByID(ctx context.Context, id string) (MsgDispatchPool, error)
 	DispatchPoolUpsert(ctx context.Context, arg DispatchPoolUpsertParams) error
+	EmailDomainMapping2FAMethodInsert(ctx context.Context, arg EmailDomainMapping2FAMethodInsertParams) error
+	EmailDomainMapping2FAMethodsClear(ctx context.Context, emailDomainMappingID string) error
+	EmailDomainMapping2FAMethodsForMappings(ctx context.Context, dollar_1 []string) ([]EmailDomainMapping2FAMethodsForMappingsRow, error)
 	EmailDomainMappingAdditionalClientInsert(ctx context.Context, arg EmailDomainMappingAdditionalClientInsertParams) error
 	// ── junctions: clear + insert ─────────────────────────────────────────
 	EmailDomainMappingAdditionalClientsClear(ctx context.Context, emailDomainMappingID string) error
@@ -113,10 +116,10 @@ type Querier interface {
 	EmailDomainMappingDelete(ctx context.Context, id string) error
 	EmailDomainMappingFindAll(ctx context.Context) ([]TntEmailDomainMapping, error)
 	EmailDomainMappingFindByDomain(ctx context.Context, emailDomain string) (TntEmailDomainMapping, error)
-	// Queries for tnt_email_domain_mappings + its three junction tables
-	// (additional_clients, granted_clients, allowed_roles).
+	// Queries for tnt_email_domain_mappings + its junction tables
+	// (additional_clients, granted_clients, allowed_roles, 2fa_methods).
 	// None of the junctions declare FK ON DELETE CASCADE, so Delete must
-	// clean them explicitly. Mirrors the Rust impl.
+	// clean them explicitly. Mirrors the Rust impl (2fa_methods is Go-only).
 	EmailDomainMappingFindByID(ctx context.Context, id string) (TntEmailDomainMapping, error)
 	EmailDomainMappingGrantedClientInsert(ctx context.Context, arg EmailDomainMappingGrantedClientInsertParams) error
 	EmailDomainMappingGrantedClientsClear(ctx context.Context, emailDomainMappingID string) error

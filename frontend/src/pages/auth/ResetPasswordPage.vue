@@ -6,6 +6,8 @@ import { toTypedSchema } from "@vee-validate/zod";
 import { z } from "zod";
 import { useLoginThemeStore } from "@/stores/loginTheme";
 import { validateResetToken, confirmPasswordReset } from "@/api/auth";
+import TwoFactorSetup from "@/components/TwoFactorSetup.vue";
+import type { TwoFactorMethod } from "@/api/twofactor";
 import { getErrorMessage } from "@/utils/errors";
 
 const route = useRoute();
@@ -18,11 +20,13 @@ onMounted(async () => {
 	await checkToken();
 });
 
-type PageState = "loading" | "invalid" | "form" | "submitting";
+type PageState = "loading" | "invalid" | "form" | "submitting" | "enroll";
 
 const pageState = ref<PageState>("loading");
 const invalidReason = ref<"expired" | "not_found" | "unknown">("not_found");
 const submitError = ref<string | null>(null);
+const enrollToken = ref("");
+const enrollMethods = ref<TwoFactorMethod[]>([]);
 
 const token = (route.query["token"] as string | undefined) ?? "";
 
@@ -87,7 +91,15 @@ const onSubmit = handleSubmit(async (values) => {
 	submitError.value = null;
 
 	try {
-		await confirmPasswordReset(token, values.password);
+		const result = await confirmPasswordReset(token, values.password);
+		if (result.status === "enrollment_required" && result.enrollToken) {
+			// Domain requires 2FA — set it up before finishing. TwoFactorSetup
+			// completes the session and redirects on its own.
+			enrollToken.value = result.enrollToken;
+			enrollMethods.value = result.allowedMethods ?? [];
+			pageState.value = "enroll";
+			return;
+		}
 		await router.replace({ name: "login", query: { reset: "success" } });
 	} catch (e: unknown) {
 		submitError.value = getErrorMessage(
@@ -154,6 +166,12 @@ const onSubmit = handleSubmit(async (values) => {
           >
             Request a new reset link
           </RouterLink>
+        </template>
+
+        <!-- Forced 2FA enrollment after the password is set -->
+        <template v-else-if="pageState === 'enroll'">
+          <h2 class="login-title">Set up two-factor authentication</h2>
+          <TwoFactorSetup :enroll-token="enrollToken" :allowed-methods="enrollMethods" />
         </template>
 
         <!-- Reset form -->

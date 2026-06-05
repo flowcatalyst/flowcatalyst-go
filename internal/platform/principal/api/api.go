@@ -3,18 +3,23 @@ package api
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/application"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/audit"
 	platformauth "github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/client"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/emaildomainmapping"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/identityprovider"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/mfa"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/notify"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/principal"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/principal/operations"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/role"
@@ -22,6 +27,7 @@ import (
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/shared/apicommon"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/shared/auth"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/shared/httperror"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/tsid"
 	"github.com/flowcatalyst/flowcatalyst-go/pkg/fcsdk/usecase"
 	"github.com/flowcatalyst/flowcatalyst-go/pkg/fcsdk/usecasepgx"
 )
@@ -39,6 +45,22 @@ type State struct {
 	AnchorDomains     *platformauth.AnchorDomainRepo // for create-user anchor-domain check (optional)
 	UoW               *usecasepgx.UnitOfWork
 	PasswordEmailer   operations.PasswordResetEmailer // optional; gates /send-password-reset
+
+	// InviteEmailer (optional) sends a "set your password" link to a newly
+	// created internal user that has no password yet. Notifier (optional) sends
+	// the "your account was created" welcome to users created WITH a password.
+	InviteEmailer InviteEmailer
+	Notifier      *notify.Notifier
+	// MFA (optional) backs POST /api/principals/{id}/reset-2fa.
+	MFA *mfa.Service
+	// Audit (optional) records the admin 2FA reset to the audit trail.
+	Audit *audit.Repository
+}
+
+// InviteEmailer mints a first-time set-password link for a new user. The
+// passwordreset principalEmailer satisfies it.
+type InviteEmailer interface {
+	SendInvite(ctx context.Context, p *principal.Principal) error
 }
 
 const tag = "principals"
@@ -125,6 +147,15 @@ func Register(api huma.API, s *State) {
 		Tags:          []string{tag},
 		DefaultStatus: http.StatusOK,
 	}, s.sendPasswordReset)
+
+	huma.Register(api, huma.Operation{
+		OperationID:   "resetPrincipalTwoFactor",
+		Method:        http.MethodPost,
+		Path:          "/api/principals/{id}/reset-2fa",
+		Summary:       "Clear a user's two-factor methods (forces re-enrollment)",
+		Tags:          []string{tag},
+		DefaultStatus: http.StatusOK,
+	}, s.resetTwoFactor)
 
 	huma.Register(api, huma.Operation{
 		OperationID:   "checkPrincipalEmailDomain",
@@ -469,6 +500,9 @@ func (s *State) create(ctx context.Context, in *createInput) (*createOutput, err
 	if err != nil {
 		return nil, err
 	}
+	if created, ferr := s.Repo.FindByID(ctx, committed.Event().UserID); ferr == nil && created != nil {
+		s.notifyNewUser(ctx, created, in.Body.Password)
+	}
 	return &createOutput{Body: apicommon.CreatedResponse{ID: committed.Event().UserID}}, nil
 }
 
@@ -579,7 +613,30 @@ func (s *State) createUser(ctx context.Context, in *createUserInput) (*getOutput
 	if err != nil || created == nil {
 		return nil, httperror.NotFound("Principal", committed.Event().UserID)
 	}
+	s.notifyNewUser(ctx, created, in.Body.Password)
 	return &getOutput{Body: fromEntity(created)}, nil
+}
+
+// notifyNewUser emails a freshly-created INTERNAL user (best-effort): a
+// passwordless account gets a "set your password" invite (which carries the
+// invite token + the 2FA enrollment hand-off); an account created WITH a
+// password gets a plain "account created" welcome (2FA, if required, is then
+// enforced at first sign-in). Federated/OIDC users get nothing.
+func (s *State) notifyNewUser(ctx context.Context, p *principal.Principal, password *string) {
+	if p == nil || p.UserIdentity == nil || p.UserIdentity.Provider != nil {
+		return // service account, or federated user
+	}
+	emailAddr := strings.TrimSpace(p.UserIdentity.Email)
+	if emailAddr == "" {
+		return
+	}
+	if (password == nil || *password == "") && s.InviteEmailer != nil {
+		if err := s.InviteEmailer.SendInvite(ctx, p); err != nil {
+			slog.Warn("send account invite failed", "principal", p.ID, "err", err)
+		}
+		return
+	}
+	s.Notifier.AccountCreated(ctx, emailAddr)
 }
 
 // deriveUserScope resolves (scope, home-client) from the email domain, mirroring
@@ -936,17 +993,67 @@ type statusMessageOutput struct {
 	Body apicommon.StatusChangeResponse
 }
 
-func (s *State) sendPasswordReset(ctx context.Context, in *idInput) (*statusMessageOutput, error) {
+// sendPasswordResetInput carries the path id plus an optional body asking to
+// also reset the user's 2FA as part of the reset (lost-device recovery).
+type sendPasswordResetInput struct {
+	ID   string `path:"id"`
+	Body struct {
+		Reset2FA bool `json:"reset2fa,omitempty"`
+	}
+}
+
+func (s *State) sendPasswordReset(ctx context.Context, in *sendPasswordResetInput) (*statusMessageOutput, error) {
 	ac := auth.FromContext(ctx)
 	if err := auth.RequireAnchor(ac); err != nil {
 		return nil, err
 	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
 	if err := operations.SendPasswordReset(ctx, s.Repo, s.PasswordEmailer,
-		operations.SendPasswordResetCommand{ID: in.ID}, ec); err != nil {
+		operations.SendPasswordResetCommand{ID: in.ID, Reset2FA: in.Body.Reset2FA}, ec); err != nil {
 		return nil, err
 	}
 	return &statusMessageOutput{Body: apicommon.StatusChangeResponse{Message: "Password reset email sent"}}, nil
+}
+
+// resetTwoFactor clears a user's enrolled 2FA (factors, recovery codes, pending
+// PINs, trusted devices). Anchor-only. The user must re-enroll at next sign-in
+// if their domain requires 2FA.
+func (s *State) resetTwoFactor(ctx context.Context, in *idInput) (*statusMessageOutput, error) {
+	ac := auth.FromContext(ctx)
+	if err := auth.RequireAnchor(ac); err != nil {
+		return nil, err
+	}
+	if s.MFA == nil {
+		return nil, usecase.Internal("MFA_NOT_CONFIGURED", "Two-factor service not configured", nil)
+	}
+	p, err := s.Repo.FindByID(ctx, in.ID)
+	if err != nil {
+		return nil, usecase.Internal("REPO", "find_by_id failed", err)
+	}
+	if p == nil {
+		return nil, httperror.NotFound("Principal", in.ID)
+	}
+	if !p.IsUser() {
+		return nil, usecase.Validation("NOT_USER", "Two-factor reset only applies to user accounts")
+	}
+	if err := s.MFA.ResetAll(ctx, p.ID); err != nil {
+		return nil, usecase.Internal("MFA", "reset failed", err)
+	}
+	if p.UserIdentity != nil {
+		s.Notifier.TwoFactorReset(ctx, p.UserIdentity.Email)
+	}
+	if s.Audit != nil {
+		actor := ac.PrincipalID
+		_ = s.Audit.Insert(ctx, &audit.Log{
+			ID:          tsid.Generate(tsid.AuditLog),
+			EntityType:  "PRINCIPAL",
+			EntityID:    p.ID,
+			Operation:   "2FA_RESET_BY_ADMIN",
+			PrincipalID: &actor,
+			PerformedAt: time.Now().UTC(),
+		})
+	}
+	return &statusMessageOutput{Body: apicommon.StatusChangeResponse{Message: "Two-factor authentication reset"}}, nil
 }
 
 // ── check-email-domain (admin) ───────────────────────────────────────────

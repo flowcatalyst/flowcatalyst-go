@@ -2136,6 +2136,13 @@
             },
             "type": "array"
           },
+          "allowed2faMethods": {
+            "description": "Permitted 2FA methods (TOTP, EMAIL_PIN). ≥1 required when require2fa is set.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "allowedRoleIds": {
             "items": {
               "type": "string"
@@ -2158,6 +2165,16 @@
           "primaryClientId": {
             "type": "string"
           },
+          "rememberDeviceDays": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "rememberDeviceEnabled": {
+            "type": "boolean"
+          },
+          "require2fa": {
+            "type": "boolean"
+          },
           "requiredOidcTenantId": {
             "type": "string"
           },
@@ -2173,7 +2190,9 @@
           "emailDomain",
           "identityProviderId",
           "scopeType",
-          "syncRolesFromIdp"
+          "syncRolesFromIdp",
+          "require2fa",
+          "rememberDeviceEnabled"
         ],
         "type": "object"
       },
@@ -3803,6 +3822,12 @@
             },
             "type": "array"
           },
+          "allowed2faMethods": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "allowedRoleIds": {
             "items": {
               "type": "string"
@@ -3833,6 +3858,16 @@
           "primaryClientId": {
             "type": "string"
           },
+          "rememberDeviceDays": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "rememberDeviceEnabled": {
+            "type": "boolean"
+          },
+          "require2fa": {
+            "type": "boolean"
+          },
           "requiredOidcTenantId": {
             "type": "string"
           },
@@ -3855,6 +3890,10 @@
           "grantedClientIds",
           "allowedRoleIds",
           "syncRolesFromIdp",
+          "require2fa",
+          "allowed2faMethods",
+          "rememberDeviceEnabled",
+          "rememberDeviceDays",
           "createdAt",
           "updatedAt"
         ],
@@ -5307,6 +5346,24 @@
         ],
         "type": "object"
       },
+      "SendPasswordResetInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/SendPasswordResetInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "reset2fa": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
       "ServiceAccountListResponse": {
         "additionalProperties": false,
         "properties": {
@@ -6731,6 +6788,12 @@
             },
             "type": "array"
           },
+          "allowed2faMethods": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "allowedRoleIds": {
             "items": {
               "type": "string"
@@ -6748,6 +6811,16 @@
           },
           "primaryClientId": {
             "type": "string"
+          },
+          "rememberDeviceDays": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "rememberDeviceEnabled": {
+            "type": "boolean"
+          },
+          "require2fa": {
+            "type": "boolean"
           },
           "requiredOidcTenantId": {
             "type": "string"
@@ -14593,6 +14666,47 @@
         ]
       }
     },
+    "/api/principals/{id}/reset-2fa": {
+      "post": {
+        "operationId": "resetPrincipalTwoFactor",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusChangeResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Clear a user's two-factor methods (forces re-enrollment)",
+        "tags": [
+          "principals"
+        ]
+      }
+    },
     "/api/principals/{id}/reset-password": {
       "post": {
         "operationId": "resetPrincipalPassword",
@@ -14845,6 +14959,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendPasswordResetInputBody"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {

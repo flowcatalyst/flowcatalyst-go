@@ -6,6 +6,7 @@ import {
 	emailDomainMappingsApi,
 	type CreateEmailDomainMappingRequest,
 	type ScopeType,
+	type TwoFactorMethod,
 } from "@/api/email-domain-mappings";
 import {
 	identityProvidersApi,
@@ -35,7 +36,21 @@ const form = ref({
 	primaryClientId: null as string | null,
 	requiredOidcTenantId: "" as string,
 	syncRolesFromIdp: false,
+	require2fa: false,
+	allowed2faMethods: [] as TwoFactorMethod[],
+	rememberDeviceEnabled: false,
+	rememberDeviceDays: 30,
 });
+
+// 2FA only applies to internal-auth (non-OIDC) domains.
+const show2faControls = computed(() => !isExternalIdp.value);
+
+function toggle2faMethod(method: TwoFactorMethod, on: boolean) {
+	const set = new Set(form.value.allowed2faMethods);
+	if (on) set.add(method);
+	else set.delete(method);
+	form.value.allowed2faMethods = [...set];
+}
 
 const isSelectedProviderMultiTenant = computed(() => {
 	return selectedProvider.value?.oidcMultiTenant === true;
@@ -166,6 +181,17 @@ async function createMapping() {
 					: undefined,
 			syncRolesFromIdp: showRolePicker.value
 				? form.value.syncRolesFromIdp
+				: undefined,
+			require2fa: show2faControls.value ? form.value.require2fa : undefined,
+			allowed2faMethods:
+				show2faControls.value && form.value.require2fa
+					? form.value.allowed2faMethods
+					: undefined,
+			rememberDeviceEnabled: show2faControls.value
+				? form.value.rememberDeviceEnabled
+				: undefined,
+			rememberDeviceDays: show2faControls.value
+				? form.value.rememberDeviceDays
 				: undefined,
 		};
 
@@ -347,6 +373,69 @@ async function createMapping() {
             Synced roles are filtered by the allowed roles list above.
           </small>
         </div>
+
+        <!-- Two-factor authentication (internal-auth domains only) -->
+        <template v-if="show2faControls">
+          <div class="field">
+            <label for="require2fa">Require Two-Factor Authentication</label>
+            <div class="toggle-row">
+              <ToggleSwitch id="require2fa" v-model="form.require2fa" />
+              <span class="toggle-label">{{ form.require2fa ? 'Required' : 'Optional' }}</span>
+            </div>
+            <small class="field-help">
+              Applies to password sign-in for this domain. Passkey sign-in is unaffected;
+              federated (SSO) users are never prompted.
+            </small>
+          </div>
+
+          <div v-if="form.require2fa" class="field">
+            <label>Allowed 2FA Methods</label>
+            <div class="toggle-row" style="gap: 16px">
+              <label class="checkbox-row">
+                <input
+                  type="checkbox"
+                  :checked="form.allowed2faMethods.includes('TOTP')"
+                  @change="toggle2faMethod('TOTP', ($event.target as HTMLInputElement).checked)"
+                />
+                Authenticator app
+              </label>
+              <label class="checkbox-row">
+                <input
+                  type="checkbox"
+                  :checked="form.allowed2faMethods.includes('EMAIL_PIN')"
+                  @change="toggle2faMethod('EMAIL_PIN', ($event.target as HTMLInputElement).checked)"
+                />
+                Email code
+              </label>
+            </div>
+            <Message
+              v-if="form.allowed2faMethods.length === 0"
+              severity="warn"
+              :closable="false"
+            >
+              Select at least one method.
+            </Message>
+          </div>
+
+          <div v-if="form.require2fa" class="field">
+            <label for="rememberDevice">Allow "remember this device"</label>
+            <div class="toggle-row">
+              <ToggleSwitch id="rememberDevice" v-model="form.rememberDeviceEnabled" />
+              <span class="toggle-label">{{ form.rememberDeviceEnabled ? 'Allowed' : 'Off' }}</span>
+            </div>
+          </div>
+
+          <div v-if="form.require2fa && form.rememberDeviceEnabled" class="field">
+            <label for="rememberDays">Remember for (days)</label>
+            <InputNumber
+              id="rememberDays"
+              v-model="form.rememberDeviceDays"
+              :min="1"
+              :max="365"
+              showButtons
+            />
+          </div>
+        </template>
 
         <Message v-if="form.scopeType === 'ANCHOR'" severity="info" :closable="false">
           Anchor users have platform admin access and can access all clients.

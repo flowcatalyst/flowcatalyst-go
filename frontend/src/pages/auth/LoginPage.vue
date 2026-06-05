@@ -6,12 +6,17 @@ import { toTypedSchema } from "@vee-validate/zod";
 import { z } from "zod";
 import { useAuthStore } from "@/stores/auth";
 import { useLoginThemeStore } from "@/stores/loginTheme";
-import { checkEmailDomain, login } from "@/api/auth";
+import { checkEmailDomain, login, type LoginResult } from "@/api/auth";
 import { authenticateWithPasskey, isWebauthnSupported } from "@/api/webauthn";
+import TwoFactorChallenge from "@/components/TwoFactorChallenge.vue";
+import TwoFactorSetup from "@/components/TwoFactorSetup.vue";
 import router from "@/router";
 import { getErrorMessage } from "@/utils/errors";
 
-type LoginStep = "email" | "password" | "redirecting";
+type LoginStep = "email" | "password" | "redirecting" | "2fa" | "enroll";
+
+type MfaChallenge = Extract<LoginResult, { status: "mfa_required" }>;
+type MfaEnroll = Extract<LoginResult, { status: "enrollment_required" }>;
 
 const route = useRoute();
 const authStore = useAuthStore();
@@ -28,6 +33,8 @@ onMounted(async () => {
 
 const step = ref<LoginStep>("email");
 const isSubmitting = ref(false);
+const mfaChallenge = ref<MfaChallenge | null>(null);
+const mfaEnroll = ref<MfaEnroll | null>(null);
 
 // Email step schema
 const emailSchema = toTypedSchema(
@@ -133,7 +140,18 @@ async function onSubmitPassword() {
 	isSubmitting.value = true;
 
 	try {
-		await login({ email: currentEmail.value, password: passwordValue.value });
+		const result = await login({
+			email: currentEmail.value,
+			password: passwordValue.value,
+		});
+		if (result.status === "mfa_required") {
+			mfaChallenge.value = result;
+			step.value = "2fa";
+		} else if (result.status === "enrollment_required") {
+			mfaEnroll.value = result;
+			step.value = "enroll";
+		}
+		// "ok" → login() already established the session and redirected.
 	} catch {
 		// Error is handled by AuthStore
 	} finally {
@@ -242,7 +260,11 @@ async function onPasskeyLogin() {
               ? 'Sign in to your account'
               : step === 'password'
                 ? 'Enter your password'
-                : 'Redirecting...'
+                : step === '2fa'
+                  ? 'Verify it\'s you'
+                  : step === 'enroll'
+                    ? 'Set up two-factor authentication'
+                    : 'Redirecting...'
           }}
         </h2>
 
@@ -349,6 +371,21 @@ async function onPasskeyLogin() {
             @click="onPasskeyLogin"
           />
         </form>
+
+        <!-- 2FA challenge step -->
+        <TwoFactorChallenge
+          v-if="step === '2fa' && mfaChallenge"
+          :mfa-token="mfaChallenge.mfaToken"
+          :methods="mfaChallenge.methods"
+          :remember-device-allowed="mfaChallenge.rememberDeviceAllowed"
+        />
+
+        <!-- Forced enrollment step -->
+        <TwoFactorSetup
+          v-if="step === 'enroll' && mfaEnroll"
+          :enroll-token="mfaEnroll.enrollToken"
+          :allowed-methods="mfaEnroll.allowedMethods"
+        />
       </div>
 
       <!-- Footer -->

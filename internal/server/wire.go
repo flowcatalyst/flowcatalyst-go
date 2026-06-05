@@ -26,8 +26,10 @@ import (
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/grantstore"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/login"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/loginbackoff"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/mfatoken"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/oauthapi"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/provider"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/auth/twofa"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/client"
 	clientapi "github.com/flowcatalyst/flowcatalyst-go/internal/platform/client/api"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/connection"
@@ -48,6 +50,8 @@ import (
 	identityproviderapi "github.com/flowcatalyst/flowcatalyst-go/internal/platform/identityprovider/api"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/loginattempt"
 	loginattemptapi "github.com/flowcatalyst/flowcatalyst-go/internal/platform/loginattempt/api"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/mfa"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/notify"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/openapispecs"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/passwordreset"
 	passwordresetapi "github.com/flowcatalyst/flowcatalyst-go/internal/platform/passwordreset/api"
@@ -231,6 +235,18 @@ func WirePlatform(r chi.Router, pool *pgxpool.Pool, cfg EnvCfg) error {
 	// hey-api codegen, the Hey-API frontend client) can access it.
 	var humaAPI huma.API
 
+	// Email + 2FA services. emailSvc is shared by the MFA challenge mailer and
+	// the password-reset mailer below (SMTP_* env; logs when unconfigured).
+	// mfaSvc carries TOTP/email-PIN/recovery-code/trusted-device logic; TOTP
+	// secrets are encrypted with encSvc (TOTP degrades gracefully if no key).
+	// mfaTokens signs the short-lived pending/enroll tokens with a secret
+	// derived from the session-signing key (rejected by the RS256 middleware).
+	emailSvc := email.FromEnv()
+	mfaSvc := mfa.NewService(mfa.NewRepository(pool), encSvc, emailSvc, mfa.DefaultConfig())
+	mfaTokens := mfatoken.NewIssuer(authProvider.SigningKey(), authProvider.Issuer())
+	notifier := notify.New(emailSvc)
+	twofaPolicy := twofa.Policy{Mappings: edmRepo, IDPs: idpRepo}
+
 	// Public auth surface: SPA login + cookie acquisition. MUST live
 	// outside the bearer-token middleware below — a stale fc_session
 	// cookie from a previous run would otherwise 401 the request before
@@ -247,6 +263,12 @@ func WirePlatform(r chi.Router, pool *pgxpool.Pool, cfg EnvCfg) error {
 		// signer so a token issued via either path rotates identically.
 		RefreshTokens: oauthTokenEP.RefreshTokens,
 		Auth:          authSvc,
+		// 2FA: challenge/enroll endpoints. (A passkey does not exempt the
+		// password path, so no webauthn dependency here.)
+		MFA:       mfaSvc,
+		MFATokens: mfaTokens,
+		Notifier:  notifier,
+		Audit:     auditRepo,
 	})
 	loginEP.RegisterPublicRoutes(r)
 
@@ -259,7 +281,7 @@ func WirePlatform(r chi.Router, pool *pgxpool.Pool, cfg EnvCfg) error {
 	// like /auth/login. Email is delivered via the SMTP_* env (SendGrid in
 	// prod); when SMTP isn't configured the message is logged instead. Delivery
 	// is best-effort — a send failure never fails the request (matching Rust).
-	emailSvc := email.FromEnv()
+	// emailSvc is the shared mailer constructed above with the 2FA services.
 	resetTokenRepo := passwordreset.NewRepository(pool)
 	passwordresetapi.RegisterRoutes(r, &passwordresetapi.State{
 		Principals:      principalRepo,
@@ -267,6 +289,12 @@ func WirePlatform(r chi.Router, pool *pgxpool.Pool, cfg EnvCfg) error {
 		UoW:             uow,
 		ExternalBaseURL: cfg.JWTIssuer,
 		Emailer:         passwordresetapi.NewEmailer(emailSvc),
+		// 2FA hand-off: clear-on-reset_2fa, revoke remembered devices, and
+		// return enrollment_required when the domain compels a second factor.
+		MFA:       mfaSvc,
+		MFATokens: mfaTokens,
+		Policy:    twofaPolicy,
+		Notifier:  notifier,
 	})
 	// Admin-triggered reset (POST /api/principals/{id}/send-password-reset)
 	// shares the same token repo + mailer.
@@ -340,6 +368,10 @@ func WirePlatform(r chi.Router, pool *pgxpool.Pool, cfg EnvCfg) error {
 			IdentityProviders: idpRepo,
 			AnchorDomains:     authRepo.AnchorDomains,
 			PasswordEmailer:   principalResetEmailer,
+			InviteEmailer:     principalResetEmailer,
+			Notifier:          notifier,
+			MFA:               mfaSvc,
+			Audit:             auditRepo,
 			UoW:               uow,
 		})
 
@@ -500,6 +532,7 @@ func WirePlatform(r chi.Router, pool *pgxpool.Pool, cfg EnvCfg) error {
 			Provider:     authProvider,
 			CookieSecure: !cfg.AuthAllowTestHeaders,
 			SessionTTL:   login.SessionTTL,
+			Notifier:     notifier,
 		})
 
 		// Shared BFF/SDK endpoints (dashboard + SDK ingest)
