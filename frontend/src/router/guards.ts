@@ -1,8 +1,15 @@
 import type { NavigationGuardNext, RouteLocationNormalized } from "vue-router";
-import { useAuthStore } from "@/stores/auth";
+import { useAuthStore, type User } from "@/stores/auth";
 import { usePermissionsStore, getRoutePermission } from "@/stores/permissions";
 import { usePlatformConfigStore } from "@/stores/platformConfig";
 import { checkSession } from "@/api/auth";
+
+// landingPath is where a freshly-authenticated user is sent: the dashboard if
+// they have any roles, otherwise their profile (a user with no roles can't do
+// anything else, so we drop them somewhere usable instead of an empty dashboard).
+export function landingPath(user: User | null): string {
+	return (user?.roles?.length ?? 0) > 0 ? "/dashboard" : "/profile";
+}
 
 /**
  * Guard that ensures user is authenticated.
@@ -97,8 +104,9 @@ export async function guestGuard(
 			return;
 		}
 
-		// Normal case - redirect to dashboard (replace to avoid back-button loop)
-		next({ path: "/dashboard", replace: true });
+		// Normal case - go to the dashboard, or the profile if the user has no
+		// roles (replace to avoid a back-button loop).
+		next({ path: landingPath(authStore.user), replace: true });
 		return;
 	}
 
@@ -133,7 +141,7 @@ export function roleGuard(requiredRole: string) {
 export function permissionGuard(requiredPermission: string) {
 	return (
 		to: RouteLocationNormalized,
-		from: RouteLocationNormalized,
+		_from: RouteLocationNormalized,
 		next: NavigationGuardNext,
 	): void => {
 		const authStore = useAuthStore();
@@ -153,12 +161,8 @@ export function permissionGuard(requiredPermission: string) {
 			path: to.fullPath,
 		});
 
-		// Stay on current page or go to dashboard if no history
-		if (from.name) {
-			next(false);
-		} else {
-			next("/dashboard");
-		}
+		// Direct the user to their profile — somewhere they can always access.
+		next({ path: "/profile", replace: true });
 	};
 }
 
@@ -169,7 +173,7 @@ export function permissionGuard(requiredPermission: string) {
 export function createRoutePermissionGuard() {
 	return (
 		to: RouteLocationNormalized,
-		from: RouteLocationNormalized,
+		_from: RouteLocationNormalized,
 		next: NavigationGuardNext,
 	): void => {
 		const authStore = useAuthStore();
@@ -177,6 +181,13 @@ export function createRoutePermissionGuard() {
 
 		// Skip for unauthenticated users (authGuard will handle)
 		if (!authStore.isAuthenticated) {
+			next();
+			return;
+		}
+
+		// Profile is always reachable — it's where we send users who can't go
+		// elsewhere, so never bounce them away from it.
+		if (to.path === "/profile") {
 			next();
 			return;
 		}
@@ -222,11 +233,7 @@ export function createRoutePermissionGuard() {
 			path: to.fullPath,
 		});
 
-		// Stay on current page or go to dashboard if no history
-		if (from.name) {
-			next(false);
-		} else {
-			next("/dashboard");
-		}
+		// Direct the user to their profile — somewhere they can always access.
+		next({ path: "/profile", replace: true });
 	};
 }

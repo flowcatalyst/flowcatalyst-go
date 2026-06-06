@@ -143,7 +143,11 @@ export function redirectAfterLogin(): void {
 		window.location.href = `/oauth/authorize?${oauthParams.toString()}`;
 		return;
 	}
-	void router.replace("/dashboard");
+	// Dashboard, or the profile for a user with no roles (nothing else to do).
+	const authStore = useAuthStore();
+	const dest =
+		(authStore.user?.roles?.length ?? 0) > 0 ? "/dashboard" : "/profile";
+	void router.replace(dest);
 }
 
 // applyLoginSuccess = set user + redirect. Used by the password and 2FA-verify

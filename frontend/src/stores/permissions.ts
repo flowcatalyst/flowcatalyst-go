@@ -134,6 +134,8 @@ export const ROUTE_PERMISSIONS: Record<string, string> = {
 	// Authentication - OAuth Clients
 	"/authentication/oauth-clients": "platform:iam:oauth-client:view",
 	"/authentication/oauth-clients/new": "platform:iam:oauth-client:create",
+	// Client-admin reset-approval queue — gated to user-management roles.
+	"/authentication/reset-approvals": "platform:iam:user:update",
 
 	// Event Types
 	"/event-types": "platform:messaging:event-type:view",
