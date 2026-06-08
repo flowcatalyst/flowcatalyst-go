@@ -141,6 +141,8 @@ func (e *Endpoint) RegisterAuthenticatedRoutes(r chi.Router) {
 	// password and — when the user has 2FA enrolled — a current second factor.
 	r.Post("/auth/change-password", e.handleChangePassword)
 	r.Post("/auth/change-password/send-email-code", e.handleChangePasswordSendEmailCode)
+	// Recent sign-in activity for the Profile screen's session view.
+	r.Get("/auth/login-history", e.handleLoginHistory)
 	// Session-gated 2FA self-service (Profile screen). No-op when MFA unwired.
 	e.RegisterTwoFactorSelfServiceRoutes(r)
 }

@@ -89,6 +89,70 @@ async function sendEmailCode() {
 		toast.error("Send failed", getErrorMessage(e, "Could not send a code."));
 	}
 }
+
+// ── Session / sign-in activity ──────────────────────────────────────────────
+interface LoginHistoryItem {
+	attemptType: string;
+	outcome: string;
+	failureReason?: string;
+	ipAddress?: string;
+	userAgent?: string;
+	attemptedAt: string;
+}
+
+const showSessions = ref(false);
+const sessionsLoading = ref(false);
+const attempts = ref<LoginHistoryItem[]>([]);
+
+async function openSessions() {
+	showSessions.value = true;
+	sessionsLoading.value = true;
+	attempts.value = [];
+	try {
+		const res = await fetch("/auth/login-history", { credentials: "include" });
+		if (!res.ok) throw new Error("Could not load sign-in activity.");
+		const data = await res.json();
+		attempts.value = data.attempts ?? [];
+	} catch (e) {
+		toast.error("Error", getErrorMessage(e, "Could not load sign-in activity."));
+	} finally {
+		sessionsLoading.value = false;
+	}
+}
+
+function formatWhen(iso: string): string {
+	return new Date(iso).toLocaleString();
+}
+
+// Condense a user-agent into a short "Browser on OS" label.
+function deviceLabel(ua?: string): string {
+	if (!ua) return "Unknown device";
+	const browser = /Edg\//.test(ua)
+		? "Edge"
+		: /Chrome\//.test(ua)
+			? "Chrome"
+			: /Firefox\//.test(ua)
+				? "Firefox"
+				: /Safari\//.test(ua)
+					? "Safari"
+					: "Browser";
+	const os = /Windows/.test(ua)
+		? "Windows"
+		: /Mac OS X|Macintosh/.test(ua)
+			? "macOS"
+			: /Android/.test(ua)
+				? "Android"
+				: /iPhone|iPad|iOS/.test(ua)
+					? "iOS"
+					: /Linux/.test(ua)
+						? "Linux"
+						: "";
+	return os ? `${browser} on ${os}` : browser;
+}
+
+function outcomeOk(outcome: string): boolean {
+	return outcome.toUpperCase() === "SUCCESS";
+}
 </script>
 
 <template>
@@ -161,10 +225,10 @@ async function sendEmailCode() {
               <i class="pi pi-clock"></i>
             </div>
             <div class="security-details">
-              <h4>Session Management</h4>
-              <p>View and manage your active sessions</p>
+              <h4>Sign-in Activity</h4>
+              <p>Review recent sign-ins to your account</p>
             </div>
-            <Button label="View" outlined size="small" />
+            <Button label="View" outlined size="small" @click="openSessions" />
           </div>
         </div>
       </div>
@@ -239,6 +303,55 @@ async function sendEmailCode() {
           :loading="cpBusy"
           @click="submitChangePassword"
         />
+      </template>
+    </Dialog>
+
+    <!-- Sign-in activity dialog -->
+    <Dialog
+      v-model:visible="showSessions"
+      header="Recent sign-in activity"
+      modal
+      :style="{ width: '40rem' }"
+    >
+      <div v-if="sessionsLoading" class="sessions-loading">
+        <ProgressSpinner strokeWidth="3" />
+      </div>
+      <div v-else>
+        <p class="sessions-note">
+          Sessions last up to 24 hours and can't be signed out individually. If you
+          see activity you don't recognise, change your password.
+        </p>
+        <DataTable :value="attempts" size="small" stripedRows class="sessions-table">
+          <Column header="When">
+            <template #body="{ data }">
+              <span>{{ formatWhen(data.attemptedAt) }}</span>
+            </template>
+          </Column>
+          <Column header="Result">
+            <template #body="{ data }">
+              <Tag
+                :value="outcomeOk(data.outcome) ? 'Success' : 'Failed'"
+                :severity="outcomeOk(data.outcome) ? 'success' : 'danger'"
+              />
+            </template>
+          </Column>
+          <Column header="Device">
+            <template #body="{ data }">
+              <span v-tooltip.top="data.userAgent">{{ deviceLabel(data.userAgent) }}</span>
+            </template>
+          </Column>
+          <Column header="IP">
+            <template #body="{ data }">
+              <span class="sessions-ip">{{ data.ipAddress || '—' }}</span>
+            </template>
+          </Column>
+          <template #empty>
+            <div class="sessions-empty">No recent sign-in activity.</div>
+          </template>
+        </DataTable>
+      </div>
+      <template #footer>
+        <Button label="Close" text @click="showSessions = false" />
       </template>
     </Dialog>
   </div>
@@ -417,5 +530,29 @@ async function sendEmailCode() {
 
 .w-full {
   width: 100%;
+}
+
+.sessions-loading {
+  display: flex;
+  justify-content: center;
+  padding: 40px;
+}
+
+.sessions-note {
+  margin: 0 0 16px;
+  font-size: 13px;
+  color: #64748b;
+}
+
+.sessions-ip {
+  font-family: monospace;
+  font-size: 12px;
+  color: #475569;
+}
+
+.sessions-empty {
+  text-align: center;
+  padding: 24px;
+  color: #94a3b8;
 }
 </style>
