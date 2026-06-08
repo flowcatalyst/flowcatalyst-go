@@ -137,6 +137,10 @@ func (e *Endpoint) RegisterPublicRoutes(r chi.Router) {
 // so the AuthContext is populated by the time handleMe runs.
 func (e *Endpoint) RegisterAuthenticatedRoutes(r chi.Router) {
 	r.Get("/auth/me", e.handleMe)
+	// Self-service password change (Profile screen). Requires the current
+	// password and — when the user has 2FA enrolled — a current second factor.
+	r.Post("/auth/change-password", e.handleChangePassword)
+	r.Post("/auth/change-password/send-email-code", e.handleChangePasswordSendEmailCode)
 	// Session-gated 2FA self-service (Profile screen). No-op when MFA unwired.
 	e.RegisterTwoFactorSelfServiceRoutes(r)
 }
