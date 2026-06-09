@@ -379,6 +379,7 @@ func WirePlatform(r chi.Router, pool *pgxpool.Pool, cfg EnvCfg) error {
 			GrantRepo:         principalGrantRepo,
 			Roles:             roleRepo,
 			Applications:      applicationRepo,
+			ClientConfigs:     applicationClientConfigRepo,
 			Clients:           clientRepo,
 			Mappings:          edmRepo,
 			IdentityProviders: idpRepo,

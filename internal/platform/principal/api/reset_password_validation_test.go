@@ -52,3 +52,34 @@ func TestResetPasswordAcceptsSDKBody(t *testing.T) {
 		t.Fatalf("expected 'validation failed' envelope, got: %s", bad.Body.String())
 	}
 }
+
+// TestSendPasswordResetAllowsEmptyBody pins that the admin "Resend Reset
+// Password" action — which POSTs with no request body — reaches the handler.
+// sendPasswordResetInput.Body is a pointer (optional); a non-pointer body made
+// huma reject the body-less call with "request body is required", which is the
+// production error. A body carrying reset2fa must keep working too.
+func TestSendPasswordResetAllowsEmptyBody(t *testing.T) {
+	httpcompat.Init()
+
+	_, api := humatest.New(t)
+	huma.Register(api, huma.Operation{
+		OperationID: "test-send-password-reset-body",
+		Method:      http.MethodPost,
+		Path:        "/api/principals/{id}/send-password-reset",
+	}, func(_ context.Context, _ *sendPasswordResetInput) (*statusMessageOutput, error) {
+		return &statusMessageOutput{}, nil
+	})
+
+	// Body-less POST (what the SPA sends) must not be a 400.
+	empty := api.Post("/api/principals/p_123/send-password-reset")
+	if empty.Code == http.StatusBadRequest {
+		t.Fatalf("body-less send-password-reset was rejected: %d %s", empty.Code, empty.Body.String())
+	}
+
+	// An explicit reset2fa body must also pass validation.
+	withBody := api.Post("/api/principals/p_123/send-password-reset",
+		map[string]any{"reset2fa": true})
+	if withBody.Code == http.StatusBadRequest {
+		t.Fatalf("reset2fa body was rejected: %d %s", withBody.Code, withBody.Body.String())
+	}
+}

@@ -17,6 +17,7 @@ import (
 	"encoding/base64"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -183,6 +184,17 @@ func (s *State) registerComplete(ctx context.Context, in *registerCompleteInput)
 		return nil, usecase.Authorization("UNAUTHENTICATED", "authentication required")
 	}
 
+	// A passkey must carry a non-empty name so the owner can tell their
+	// credentials apart when managing/revoking them. Validated before the
+	// ceremony state is consumed so a name-less attempt can be retried.
+	name := ""
+	if in.Body.Name != nil {
+		name = strings.TrimSpace(*in.Body.Name)
+	}
+	if name == "" {
+		return nil, httperror.BadRequest("NAME_REQUIRED", "a passkey name is required")
+	}
+
 	consumed, err := s.Service.Ceremonies().ConsumeRegistration(ctx, in.Body.StateID)
 	if err != nil || consumed == nil {
 		return nil, httperror.BadRequest("STATE_NOT_FOUND",
@@ -209,7 +221,7 @@ func (s *State) registerComplete(ctx context.Context, in *registerCompleteInput)
 
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
 	committed, err := operations.Register(ctx, s.Creds, s.UoW,
-		operations.RegisterCommand{StateID: in.Body.StateID, Response: *cred, Name: in.Body.Name}, ec)
+		operations.RegisterCommand{StateID: in.Body.StateID, Response: *cred, Name: &name}, ec)
 	if err != nil {
 		return nil, err
 	}

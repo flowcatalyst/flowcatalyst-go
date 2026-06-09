@@ -40,7 +40,12 @@ type State struct {
 	GrantRepo         *principal.ClientAccessGrantRepo
 	Roles             *role.Repository
 	Applications      *application.Repository
-	Clients           *client.Repository
+	// ClientConfigs resolves which applications a client is entitled to (its
+	// enabled client-configs). It bounds what a non-anchor (client-admin) may
+	// assign: a client-admin can grant a user ANY application the client can
+	// access, not merely the apps the admin personally holds.
+	ClientConfigs *application.ClientConfigRepo
+	Clients       *client.Repository
 	Mappings          *emaildomainmapping.Repository // for /check-email-domain + create-user scope derivation
 	IdentityProviders *identityprovider.Repository   // for /check-email-domain + create-user idp-type
 	AnchorDomains     *platformauth.AnchorDomainRepo // for create-user anchor-domain check (optional)
@@ -583,7 +588,11 @@ func (s *State) importRow(ctx context.Context, ac *auth.AuthContext, ec usecase.
 
 	// Validate the row's roles are available to the client (non-anchor admins).
 	if !ac.IsAnchor() {
-		if err := s.assertAssignableRoles(ctx, ac, roles); err != nil {
+		allowed, err := s.clientAppIDs(ctx, clientID)
+		if err != nil {
+			return "error", errMessage(err)
+		}
+		if err := s.assertAssignableRoles(ctx, roles, allowed); err != nil {
 			return "error", errMessage(err)
 		}
 	}
@@ -876,10 +885,12 @@ func blockNonClientTarget(ac *auth.AuthContext, p *principal.Principal) error {
 
 // assertAssignableRoles bounds a non-anchor (client-admin) role assignment:
 // every role must be application-scoped (ApplicationID set — i.e. NOT a platform
-// role) and belong to an application the caller can access. This is what stops a
-// client-admin from granting platform roles (escalation) or app roles their
-// client isn't entitled to. Anchors are not subject to this (callers skip it).
-func (s *State) assertAssignableRoles(ctx context.Context, ac *auth.AuthContext, roleNames []string) error {
+// role) and belong to an application the TARGET CLIENT can access (allowed). A
+// client-admin can therefore grant any role for any application the client is
+// entitled to — not just the apps the admin personally holds. This still stops
+// granting platform roles (escalation) or app roles the client isn't entitled
+// to. Anchors are not subject to this (callers skip it).
+func (s *State) assertAssignableRoles(ctx context.Context, roleNames []string, allowed map[string]bool) error {
 	for _, name := range roleNames {
 		r, err := s.Roles.FindByName(ctx, name)
 		if err != nil {
@@ -892,45 +903,64 @@ func (s *State) assertAssignableRoles(ctx context.Context, ac *auth.AuthContext,
 			return usecase.Authorization("PLATFORM_ROLE_FORBIDDEN",
 				"client administrators cannot assign platform roles")
 		}
-		if !containsStr(ac.Applications, *r.ApplicationID) {
+		if !allowed[*r.ApplicationID] {
 			return usecase.Authorization("ROLE_APP_FORBIDDEN",
-				"role belongs to an application your client cannot access")
+				"role belongs to an application the client cannot access")
 		}
 	}
 	return nil
 }
 
-func containsStr(xs []string, s string) bool {
-	for _, x := range xs {
-		if x == s {
-			return true
+// clientAppIDs returns the set of application IDs the given client is entitled
+// to — the applications it has an enabled client-config for. This is the bound
+// a non-anchor (client-admin) is held to when assigning roles/applications.
+func (s *State) clientAppIDs(ctx context.Context, clientID string) (map[string]bool, error) {
+	allowed := map[string]bool{}
+	if clientID == "" || s.ClientConfigs == nil {
+		return allowed, nil
+	}
+	cfgs, err := s.ClientConfigs.FindByClient(ctx, clientID)
+	if err != nil {
+		return nil, usecase.Internal("REPO", "find_client_configs failed", err)
+	}
+	for _, c := range cfgs {
+		if c.Enabled {
+			allowed[c.ApplicationID] = true
 		}
 	}
-	return false
+	return allowed, nil
+}
+
+// clientIDOf returns a principal's client id, or "" when it has none.
+func clientIDOf(p *principal.Principal) string {
+	if p == nil || p.ClientID == nil {
+		return ""
+	}
+	return *p.ClientID
 }
 
 // assertAssignableApplications bounds a non-anchor (client-admin) application
-// grant: every application in the requested set must be one the caller's client
-// can access. This stops a client-admin from granting a user access to an
-// application the client isn't entitled to. Anchors are not subject to this.
-func (s *State) assertAssignableApplications(ac *auth.AuthContext, appIDs []string) error {
+// grant: every application in the requested set must be one the TARGET CLIENT
+// can access (allowed). This stops a client-admin from granting a user access to
+// an application the client isn't entitled to. Anchors are not subject to this.
+func (s *State) assertAssignableApplications(appIDs []string, allowed map[string]bool) error {
 	for _, id := range appIDs {
-		if !containsStr(ac.Applications, id) {
+		if !allowed[id] {
 			return usecase.Authorization("APP_FORBIDDEN",
-				"application your client cannot access: "+id)
+				"application the client cannot access: "+id)
 		}
 	}
 	return nil
 }
 
 // preservedApplications returns the subset of a user's existing application
-// grants that a non-anchor admin may NOT manage (apps outside the client's
+// grants that a non-anchor admin may NOT manage (apps outside the CLIENT's
 // reach). A client-admin's SET preserves these so it can't strip a user's access
 // to applications the client itself can't see — mirrors protectedRoleNames.
-func preservedApplications(ac *auth.AuthContext, existing []string) []string {
+func preservedApplications(existing []string, allowed map[string]bool) []string {
 	var out []string
 	for _, id := range existing {
-		if !containsStr(ac.Applications, id) {
+		if !allowed[id] {
 			out = append(out, id)
 		}
 	}
@@ -939,16 +969,16 @@ func preservedApplications(ac *auth.AuthContext, existing []string) []string {
 
 // protectedRoleNames returns the subset of roleNames a non-anchor admin may NOT
 // manage — platform roles (ApplicationID nil), unknown roles, or roles for apps
-// the admin can't access. A client-admin's role SET preserves these so it can't
-// strip a user's platform / other-application roles.
-func (s *State) protectedRoleNames(ctx context.Context, ac *auth.AuthContext, roleNames []string) ([]string, error) {
+// the TARGET CLIENT can't access (allowed). A client-admin's role SET preserves
+// these so it can't strip a user's platform / other-application roles.
+func (s *State) protectedRoleNames(ctx context.Context, roleNames []string, allowed map[string]bool) ([]string, error) {
 	var out []string
 	for _, name := range roleNames {
 		r, err := s.Roles.FindByName(ctx, name)
 		if err != nil {
 			return nil, usecase.Internal("REPO", "find_role failed", err)
 		}
-		if r == nil || r.ApplicationID == nil || !containsStr(ac.Applications, *r.ApplicationID) {
+		if r == nil || r.ApplicationID == nil || !allowed[*r.ApplicationID] {
 			out = append(out, name)
 		}
 	}
@@ -1102,10 +1132,14 @@ func (s *State) assignRoles(ctx context.Context, in *assignRolesInput) (*rolesAs
 	// admin can't strip a user's platform / other-application roles.
 	effectiveRoles := in.Body.Roles
 	if !ac.IsAnchor() {
-		if err := s.assertAssignableRoles(ctx, ac, in.Body.Roles); err != nil {
+		allowed, aerr := s.clientAppIDs(ctx, clientIDOf(p))
+		if aerr != nil {
+			return nil, aerr
+		}
+		if err := s.assertAssignableRoles(ctx, in.Body.Roles, allowed); err != nil {
 			return nil, err
 		}
-		preserved, perr := s.protectedRoleNames(ctx, ac, roleNamesFrom(p.Roles))
+		preserved, perr := s.protectedRoleNames(ctx, roleNamesFrom(p.Roles), allowed)
 		if perr != nil {
 			return nil, perr
 		}
@@ -1165,10 +1199,14 @@ func (s *State) assignApplicationAccess(ctx context.Context, in *assignAppAccess
 	}
 	desiredIDs := in.Body.ApplicationIDs
 	if !ac.IsAnchor() {
-		if err := s.assertAssignableApplications(ac, in.Body.ApplicationIDs); err != nil {
+		allowed, aerr := s.clientAppIDs(ctx, clientIDOf(p))
+		if aerr != nil {
+			return nil, aerr
+		}
+		if err := s.assertAssignableApplications(in.Body.ApplicationIDs, allowed); err != nil {
 			return nil, err
 		}
-		preserved := preservedApplications(ac, p.AccessibleApplicationIDs)
+		preserved := preservedApplications(p.AccessibleApplicationIDs, allowed)
 		desiredIDs = dedupeStrings(append(append([]string{}, in.Body.ApplicationIDs...), preserved...))
 	}
 	old := stringSet(p.AccessibleApplicationIDs)
@@ -1303,10 +1341,13 @@ type statusMessageOutput struct {
 }
 
 // sendPasswordResetInput carries the path id plus an optional body asking to
-// also reset the user's 2FA as part of the reset (lost-device recovery).
+// also reset the user's 2FA as part of the reset (lost-device recovery). Body
+// is a POINTER so the common "just send the reset email" action can POST with
+// no body at all: with a non-pointer Body, huma marks the request body
+// required and rejects a body-less call with "request body is required".
 type sendPasswordResetInput struct {
 	ID   string `path:"id"`
-	Body struct {
+	Body *struct {
 		Reset2FA bool `json:"reset2fa,omitempty"`
 	}
 }
@@ -1326,9 +1367,13 @@ func (s *State) sendPasswordReset(ctx context.Context, in *sendPasswordResetInpu
 	if err := blockNonClientTarget(ac, p); err != nil {
 		return nil, err
 	}
+	reset2FA := false
+	if in.Body != nil {
+		reset2FA = in.Body.Reset2FA
+	}
 	ec := usecase.NewExecutionContext(ac.PrincipalID)
 	if err := operations.SendPasswordReset(ctx, s.Repo, s.PasswordEmailer,
-		operations.SendPasswordResetCommand{ID: in.ID, Reset2FA: in.Body.Reset2FA}, ec); err != nil {
+		operations.SendPasswordResetCommand{ID: in.ID, Reset2FA: reset2FA}, ec); err != nil {
 		return nil, err
 	}
 	return &statusMessageOutput{Body: apicommon.StatusChangeResponse{Message: "Password reset email sent"}}, nil
@@ -1576,7 +1621,11 @@ func (s *State) addRole(ctx context.Context, in *addRoleInput) (*getOutput, erro
 		return nil, err
 	}
 	if !ac.IsAnchor() {
-		if err := s.assertAssignableRoles(ctx, ac, []string{in.Body.Role}); err != nil {
+		allowed, aerr := s.clientAppIDs(ctx, clientIDOf(p))
+		if aerr != nil {
+			return nil, aerr
+		}
+		if err := s.assertAssignableRoles(ctx, []string{in.Body.Role}, allowed); err != nil {
 			return nil, err
 		}
 	}
@@ -1621,7 +1670,11 @@ func (s *State) removeRole(ctx context.Context, in *removeRoleInput) (*getOutput
 	// A non-anchor admin may only remove roles they could also assign — so they
 	// can't strip a user's platform / other-application roles.
 	if !ac.IsAnchor() {
-		if err := s.assertAssignableRoles(ctx, ac, []string{in.Role}); err != nil {
+		allowed, aerr := s.clientAppIDs(ctx, clientIDOf(p))
+		if aerr != nil {
+			return nil, aerr
+		}
+		if err := s.assertAssignableRoles(ctx, []string{in.Role}, allowed); err != nil {
 			return nil, err
 		}
 	}
@@ -1761,10 +1814,20 @@ func (s *State) listAvailableApplications(ctx context.Context, in *idInput) (*li
 	if err != nil {
 		return nil, usecase.Internal("REPO", "find_active_apps failed", err)
 	}
+	// For a non-anchor admin, bound the menu to applications the target user's
+	// CLIENT is entitled to — so a client-admin can grant any app the client can
+	// access, not just the apps the admin personally holds.
+	allowed := map[string]bool{}
+	if !ac.IsAnchor() {
+		allowed, err = s.clientAppIDs(ctx, clientIDOf(p))
+		if err != nil {
+			return nil, err
+		}
+	}
 	out := make([]PrincipalAvailableApplication, 0, len(apps))
 	for i := range apps {
 		a := &apps[i]
-		if !ac.IsAnchor() && !containsStr(ac.Applications, a.ID) {
+		if !ac.IsAnchor() && !allowed[a.ID] {
 			continue
 		}
 		out = append(out, PrincipalAvailableApplication{

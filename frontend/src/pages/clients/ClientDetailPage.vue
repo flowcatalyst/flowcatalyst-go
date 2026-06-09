@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { toast } from "@/utils/errorBus";
 import { ref, computed, onMounted } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { useConfirm } from "primevue/useconfirm";
 import { clientsApi, type Client, type ClientApplication } from "@/api/clients";
 import { useReturnTo } from "@/composables/useReturnTo";
+import { getErrorMessage } from "@/utils/errors";
 
 const route = useRoute();
+const router = useRouter();
 const { returnTo } = useReturnTo();
 const confirm = useConfirm();
 
@@ -166,9 +168,12 @@ async function deactivateClient(reason: string) {
 	if (!client.value) return;
 	try {
 		await clientsApi.deactivate(client.value.id, reason);
-		client.value = await clientsApi.get(client.value.id);
 		toast.success("Success", "Client deactivated");
-	} catch {
+		// The client is now soft-deleted — re-fetching its detail would 404, so
+		// return to the listing rather than staying on a dead detail page.
+		router.push("/clients");
+	} catch (e) {
+		toast.error("Error", getErrorMessage(e, "Failed to deactivate client"));
 	}
 }
 

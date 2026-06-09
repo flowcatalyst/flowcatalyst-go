@@ -33,11 +33,15 @@ async function refresh() {
 
 async function onRegister() {
 	if (registering.value) return;
+	const name = newPasskeyName.value.trim();
+	if (!name) {
+		error.value = "Please name this passkey before adding it.";
+		return;
+	}
 	registering.value = true;
 	error.value = null;
 	successMessage.value = null;
 	try {
-		const name = newPasskeyName.value.trim() || undefined;
 		await registerPasskey(name);
 		successMessage.value = "Passkey added.";
 		newPasskeyName.value = "";
@@ -113,6 +117,7 @@ onMounted(async () => {
           label="Add a passkey"
           icon="pi pi-key"
           :loading="registering"
+          :disabled="!newPasskeyName.trim()"
           @click="onRegister"
         />
       </div>
