@@ -182,8 +182,15 @@ func (p *PendingJobPoller) pollOnce(ctx context.Context) error {
 		return nil
 	}
 
-	// Filter and gather IDs to mark QUEUED.
+	// Filter and gather IDs to mark QUEUED. Dispatch is deliberately
+	// deferred until the claim tx has committed: publishing while the tx was
+	// still open meant (a) a commit failure after a publish re-claimed the
+	// already-published job on the next poll (duplicate dispatch), and (b) a
+	// publish failure's QUEUED→PENDING revert no-oped because the QUEUED
+	// status it guards on hadn't committed yet (row stuck until stale
+	// recovery).
 	var queued []string
+	var tokens []DispatchJobToken
 	skipped := 0
 	for _, c := range claims {
 		if c.subID != "" {
@@ -193,8 +200,7 @@ func (p *PendingJobPoller) pollOnce(ctx context.Context) error {
 			}
 		}
 		queued = append(queued, c.id)
-		// Submit to dispatcher (publishes to queue).
-		p.dispatcher.Submit(ctx, DispatchJobToken{
+		tokens = append(tokens, DispatchJobToken{
 			JobID:        c.id,
 			MessageGroup: c.group,
 			TargetURL:    c.target,
@@ -211,6 +217,16 @@ func (p *PendingJobPoller) pollOnce(ctx context.Context) error {
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
+
+	// QUEUED is durable — now hand the jobs to the dispatcher. A publish
+	// failure reverts QUEUED→PENDING (dispatcher.dispatch), which is
+	// guaranteed to see the committed status; a crash between commit and
+	// Submit leaves rows QUEUED for stale recovery — the same failure mode
+	// as a crash mid-publish, handled by the existing recovery loop.
+	for _, t := range tokens {
+		p.dispatcher.Submit(ctx, t)
+	}
+
 	if len(queued) > 0 || skipped > 0 {
 		slog.Debug("poll tick", "queued", len(queued), "skipped_paused", skipped)
 	}

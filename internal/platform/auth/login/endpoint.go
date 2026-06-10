@@ -258,9 +258,18 @@ type tokenRefreshResponse struct {
 	RefreshToken string `json:"refreshToken"`
 }
 
+// errOAuthBoundToken rejects OAuth-client-bound tokens on /auth/refresh: this
+// endpoint performs no client authentication, so accepting a bound token here
+// would bypass the client-binding check the /oauth/token refresh grant
+// enforces (a stolen confidential-client token could be refreshed without the
+// client secret). Bound tokens must refresh via /oauth/token.
+var errOAuthBoundToken = errors.New("token is bound to an OAuth client")
+
 // handleRefresh exchanges a refresh token for a new access+refresh pair,
-// rotating the presented token. 1:1 with Rust auth_api.rs::refresh_token:
-// hash → find-valid → revoke → reissue (preserving accessible_clients).
+// rotating the presented token via the shared grantstore.Rotate (reuse
+// detection + family tracking + scope/client lineage — same contract as the
+// /oauth/token refresh grant). Wire shape 1:1 with Rust
+// auth_api.rs::refresh_token.
 func (e *Endpoint) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	var req refreshRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -272,24 +281,27 @@ func (e *Endpoint) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tokenHash := grantstore.HashToken(req.RefreshToken)
-	stored, err := e.cfg.RefreshTokens.FindValidByHash(r.Context(), tokenHash)
+	res, err := grantstore.Rotate(r.Context(), e.cfg.RefreshTokens, req.RefreshToken,
+		func(stored *grantstore.RefreshToken) error {
+			if stored.OAuthClientID != nil {
+				return errOAuthBoundToken
+			}
+			return nil
+		})
+	if errors.Is(err, errOAuthBoundToken) {
+		writeUnauthorized(w, "Token was not issued to this client")
+		return
+	}
 	if err != nil {
 		httperror.Write(w, err)
 		return
 	}
-	if stored == nil {
+	if res.Stored == nil {
 		writeUnauthorized(w, "Invalid or expired refresh token")
 		return
 	}
 
-	// Rotate: revoke the presented token before issuing a replacement.
-	if _, err := e.cfg.RefreshTokens.RevokeByHash(r.Context(), tokenHash); err != nil {
-		httperror.Write(w, err)
-		return
-	}
-
-	p, err := e.cfg.Principals.FindByID(r.Context(), stored.PrincipalID)
+	p, err := e.cfg.Principals.FindByID(r.Context(), res.Stored.PrincipalID)
 	if err != nil {
 		httperror.Write(w, err)
 		return
@@ -309,22 +321,11 @@ func (e *Endpoint) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	raw, entity, err := grantstore.GenerateTokenPair(p.ID)
-	if err != nil {
-		httperror.Write(w, err)
-		return
-	}
-	entity.AccessibleClients = stored.AccessibleClients
-	if err := e.cfg.RefreshTokens.Insert(r.Context(), entity); err != nil {
-		httperror.Write(w, err)
-		return
-	}
-
 	writeJSON(w, http.StatusOK, tokenRefreshResponse{
 		AccessToken:  accessToken,
 		TokenType:    "Bearer",
 		ExpiresIn:    3600,
-		RefreshToken: raw,
+		RefreshToken: res.NewRaw,
 	})
 }
 
@@ -381,7 +382,11 @@ func (e *Endpoint) handleLogin(w http.ResponseWriter, r *http.Request) {
 		httperror.Write(w, httperror.BadRequest("INVALID_JSON", err.Error()))
 		return
 	}
-	email := strings.TrimSpace(req.Email)
+	// Lower-case up front so the backoff identifier matches across attempts:
+	// emails are stored lower-cased (FindByEmail lower-cases for lookup), and
+	// failures recorded under the typed casing would otherwise let an
+	// attacker dodge the per-email ceiling by rotating case.
+	email := strings.ToLower(strings.TrimSpace(req.Email))
 	if email == "" || req.Password == "" {
 		// Constant-shape error — don't leak which field is missing.
 		writeUnauthorized(w, "Invalid credentials")
@@ -580,6 +585,10 @@ func (e *Endpoint) recordAttempt(ctx context.Context, outcome loginattempt.Outco
 	if e.cfg.LoginAttempts == nil {
 		return
 	}
+	// Normalise the identifier so records and backoff checks always agree
+	// regardless of the casing a caller passed (defense in depth on top of
+	// handleLogin's normalisation).
+	email = strings.ToLower(strings.TrimSpace(email))
 	a := loginattempt.New(loginattempt.AttemptUserLogin, outcome)
 	a.Identifier = &email
 	a.PrincipalID = principalID

@@ -13,8 +13,10 @@ package oauthapi
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -261,7 +263,9 @@ func (s *State) authenticateClient(r *http.Request, clientIDBody, clientSecretBo
 }
 
 // verifyClientSecret decrypts the stored ref and compares it to the
-// provided secret. Fails closed when no encryption service is configured.
+// provided secret in constant time (a naive == short-circuits on the first
+// differing byte, leaking prefix length to a timing observer). Fails closed
+// when no encryption service is configured.
 func (s *State) verifyClientSecret(secretRef, provided string) bool {
 	if s.Encryption == nil {
 		return false
@@ -270,7 +274,7 @@ func (s *State) verifyClientSecret(secretRef, provided string) bool {
 	if err != nil {
 		return false
 	}
-	return decrypted == provided
+	return subtle.ConstantTimeCompare([]byte(decrypted), []byte(provided)) == 1
 }
 
 // basicAuthCreds decodes an HTTP Basic Authorization header
@@ -507,44 +511,38 @@ func (s *State) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	tokenHash := grantstore.HashToken(req.RefreshToken)
-	stored, err := s.RefreshTokens.FindValidByHash(r.Context(), tokenHash)
+	// Shared rotation core (grantstore.Rotate): BCP reuse detection, revoke-
+	// before-reissue, scope/client/family lineage, replaced-by linking. The
+	// client-binding check runs as the authorize hook so a binding failure
+	// rotates nothing.
+	errClientBinding := errors.New("client binding mismatch")
+	res, err := grantstore.Rotate(r.Context(), s.RefreshTokens, req.RefreshToken,
+		func(stored *grantstore.RefreshToken) error {
+			// A token issued to a client may only be refreshed by that client.
+			if stored.OAuthClientID != nil {
+				var requesting string
+				if authenticatedClient != nil {
+					requesting = authenticatedClient.ClientID
+				}
+				if requesting != *stored.OAuthClientID {
+					return errClientBinding
+				}
+			}
+			return nil
+		})
+	if errors.Is(err, errClientBinding) {
+		writeOAuthError(w, http.StatusUnauthorized, "invalid_grant", "Token was not issued to this client")
+		return
+	}
 	if err != nil {
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "")
 		return
 	}
-	if stored == nil {
-		// Reuse detection (OAuth 2.0 Security BCP §4.14.2): a token we don't
-		// accept as valid might be one we already rotated out. If we recognise
-		// the hash as a previously-replaced token, the family is presumed
-		// compromised — revoke every token in it so a stolen, already-rotated
-		// token cannot keep the chain alive.
-		if prior, ferr := s.RefreshTokens.FindByHash(r.Context(), tokenHash); ferr == nil &&
-			prior != nil && prior.ReplacedBy != nil && prior.TokenFamily != nil {
-			_, _ = s.RefreshTokens.RevokeAllInFamily(r.Context(), *prior.TokenFamily)
-		}
+	if res.Stored == nil {
 		writeOAuthError(w, http.StatusUnauthorized, "invalid_grant", "Invalid or expired refresh token")
 		return
 	}
-
-	// Client-binding check: a token issued to a client may only be
-	// refreshed by that same client.
-	if stored.OAuthClientID != nil {
-		var requesting string
-		if authenticatedClient != nil {
-			requesting = authenticatedClient.ClientID
-		}
-		if requesting != *stored.OAuthClientID {
-			writeOAuthError(w, http.StatusUnauthorized, "invalid_grant", "Token was not issued to this client")
-			return
-		}
-	}
-
-	// Rotate: revoke the presented token before issuing a replacement.
-	if _, err := s.RefreshTokens.RevokeByHash(r.Context(), tokenHash); err != nil {
-		writeOAuthError(w, http.StatusInternalServerError, "server_error", "")
-		return
-	}
+	stored := res.Stored
 
 	p, err := s.Principals.FindByID(r.Context(), stored.PrincipalID)
 	if err != nil {
@@ -583,31 +581,8 @@ func (s *State) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
-	// Issue the rotated refresh token, preserving scopes + client binding.
-	raw, entity, err := grantstore.GenerateTokenPair(p.ID)
-	if err != nil {
-		writeOAuthError(w, http.StatusInternalServerError, "server_error", "")
-		return
-	}
-	entity.Scopes = stored.Scopes
-	entity.AccessibleClients = stored.AccessibleClients
-	entity.OAuthClientID = stored.OAuthClientID
-	// Keep the replacement in the presented token's rotation family (rooting a
-	// fresh family for legacy tokens that predate family tracking).
-	if stored.TokenFamily != nil {
-		entity.TokenFamily = stored.TokenFamily
-	} else {
-		fam := entity.ID
-		entity.TokenFamily = &fam
-	}
-	if err := s.RefreshTokens.Insert(r.Context(), entity); err != nil {
-		writeOAuthError(w, http.StatusInternalServerError, "server_error", "")
-		return
-	}
-	// Link the rotated-out token to its replacement so a later replay of it
-	// trips the reuse-detection path above.
-	_, _ = s.RefreshTokens.MarkAsReplaced(r.Context(), tokenHash, entity.TokenHash)
-
+	// The rotated refresh token (scopes + client binding + family preserved,
+	// replaced-by link recorded) was issued inside grantstore.Rotate.
 	var scope *string
 	if len(stored.Scopes) > 0 {
 		j := strings.Join(stored.Scopes, " ")
@@ -618,7 +593,7 @@ func (s *State) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Request, 
 		AccessToken:  accessToken,
 		TokenType:    "Bearer",
 		ExpiresIn:    3600,
-		RefreshToken: &raw,
+		RefreshToken: &res.NewRaw,
 		IDToken:      idToken,
 		Scope:        scope,
 	})
@@ -656,7 +631,10 @@ func verifyPKCE(challenge string, method *string, verifier string) *oauthError {
 	} else {
 		computed = verifier
 	}
-	if computed != challenge {
+	// Constant-time: the challenge is attacker-visible only at authorize
+	// time, but the plain method compares the raw verifier — don't leak
+	// match-prefix timing either way.
+	if subtle.ConstantTimeCompare([]byte(computed), []byte(challenge)) != 1 {
 		return newOAuthError(http.StatusBadRequest, "invalid_grant", "Invalid code_verifier")
 	}
 	return nil

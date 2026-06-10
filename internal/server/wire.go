@@ -137,7 +137,11 @@ func WirePlatform(r chi.Router, pool *pgxpool.Pool, cfg EnvCfg) error {
 	// path used by local development.
 	signingKey := LoadSigningKeyOrEphemeral(cfg.JWTSigningKeyPath)
 	authProvider, err := provider.NewProvider(provider.Config{
-		Issuer:     cfg.JWTIssuer,
+		Issuer: cfg.JWTIssuer,
+		// Must match authservice's access-token `aud` below so bearers it
+		// mints validate, while OIDC ID tokens (aud = an RP's client_id,
+		// same signing key) are rejected by the middleware.
+		Audience:   cfg.JWTIssuer,
 		SigningKey: signingKey,
 	}, principalRepo, roleRepo)
 	if err != nil {

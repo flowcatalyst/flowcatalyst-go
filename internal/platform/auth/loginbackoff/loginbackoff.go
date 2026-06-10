@@ -20,6 +20,7 @@ import (
 	"context"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/loginattempt"
@@ -100,7 +101,13 @@ var _ statsRepo = (*loginattempt.Repository)(nil)
 
 // Check runs the per-pair backoff + global ceiling. ip is best-effort —
 // pass "" when unknown (local dev) and only the global ceiling applies.
+//
+// The identifier is lower-cased before querying: all current callers key on
+// an email, attempts are recorded lower-cased, and a raw `identifier = $1`
+// compare on the typed casing would let an attacker dodge the per-email
+// ceiling by rotating case.
 func Check(ctx context.Context, repo statsRepo, policy Policy, identifier, ip string) (Decision, error) {
+	identifier = strings.ToLower(strings.TrimSpace(identifier))
 	now := time.Now().UTC()
 
 	// Window 1: failures since the last success bound the per-pair count.

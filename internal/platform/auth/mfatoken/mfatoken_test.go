@@ -74,7 +74,7 @@ func TestRejectedBySessionValidator(t *testing.T) {
 	key := testKey(t)
 	iss := NewIssuer(key, "iss")
 	tok, _ := iss.Mint("prn_1", PurposePending, time.Minute)
-	if _, err := sessiontoken.Validate(tok, &key.PublicKey); err == nil {
+	if _, err := sessiontoken.Validate(tok, &key.PublicKey, sessiontoken.Expect{}); err == nil {
 		t.Fatal("mfa pending token must NOT validate as a session token")
 	}
 }

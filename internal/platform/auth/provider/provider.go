@@ -32,6 +32,14 @@ type Config struct {
 	// Issuer is the JWT iss claim, e.g. "https://flowcatalyst.example.com".
 	Issuer string
 
+	// Audience is the platform audience enforced on bearer validation: a
+	// token carrying an aud claim must include it (tokens without aud —
+	// session cookies — pass). Defaults to Issuer, matching authservice's
+	// wiring. This is what keeps OIDC ID tokens minted for third-party RPs
+	// (aud = their client_id, same signing key) from replaying as platform
+	// bearers.
+	Audience string
+
 	// AccessTokenTTL is how long access tokens are valid.
 	AccessTokenTTL time.Duration
 
@@ -171,6 +179,9 @@ func NewProvider(cfg Config, principals *principal.Repository, roles *role.Repos
 	if cfg.AccessTokenTTL == 0 {
 		cfg.AccessTokenTTL = 1 * time.Hour
 	}
+	if cfg.Audience == "" {
+		cfg.Audience = cfg.Issuer
+	}
 	return &Provider{
 		cfg:        cfg,
 		signingKey: key,
@@ -229,13 +240,18 @@ func (p *Provider) MintSessionToken(ctx context.Context, principalID string, ttl
 }
 
 // ValidateSessionToken verifies a session-cookie JWT (signature + std
-// claim checks) and returns the parsed claims. Used by the platform's
-// auth middleware to verify both Authorization: Bearer tokens and
-// fc_session cookies. Both transports carry tokens signed with the same
-// RSA key (sessiontoken for cookies, authservice for /oauth/token), so
-// the signature path lines up.
+// claim checks + issuer/audience expectations) and returns the parsed
+// claims. Used by the platform's auth middleware to verify both
+// Authorization: Bearer tokens and fc_session cookies. Both transports
+// carry tokens signed with the same RSA key (sessiontoken for cookies,
+// authservice for /oauth/token), so the signature path lines up — which is
+// exactly why the audience expectation matters: OIDC ID tokens minted for
+// third-party RPs share that key too and must not validate here.
 func (p *Provider) ValidateSessionToken(_ context.Context, token string) (*sessiontoken.Claims, error) {
-	return sessiontoken.Validate(token, &p.signingKey.PublicKey)
+	return sessiontoken.Validate(token, &p.signingKey.PublicKey, sessiontoken.Expect{
+		Issuer:   p.cfg.Issuer,
+		Audience: p.cfg.Audience,
+	})
 }
 
 // parseRSAPrivateKey accepts PKCS#1 or PKCS#8 PEM blocks.

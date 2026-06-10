@@ -104,13 +104,34 @@ func Mint(c Claims, key *rsa.PrivateKey, issuer string, ttl time.Duration) (stri
 	return signed, nil
 }
 
+// Expect carries the issuer/audience expectations Validate enforces on top
+// of signature + time checks. Empty fields skip that check (test
+// convenience; production callers must set both).
+type Expect struct {
+	// Issuer, when set, must equal the token's iss claim exactly.
+	Issuer string
+	// Audience, when set, is the PLATFORM audience: a token carrying an aud
+	// claim must include it. Tokens with NO aud claim pass — session cookies
+	// are minted without one.
+	//
+	// This is the cross-purpose guard: every JWT the platform mints (session
+	// cookies, access tokens, OIDC ID tokens for third-party RPs) is signed
+	// with the same RSA key, so signature+exp alone would let an ID token —
+	// aud = the relying party's client_id, handed to an external service —
+	// replay as a full platform bearer for its lifetime. Access tokens carry
+	// aud = the platform audience and pass; ID tokens don't, and are
+	// rejected here.
+	Audience string
+}
+
 // Validate verifies the JWT signature + standard claim checks (exp,
-// nbf, iat) and returns the parsed Claims.
+// nbf, iat) plus the Expect issuer/audience rules, and returns the parsed
+// Claims.
 //
 // key must be the public half of the key Mint used. Returns a wrapped
 // error from jwt.Parse on signature / expiry failures so callers can
 // pattern-match via errors.Is(err, jwt.ErrTokenExpired) etc.
-func Validate(token string, key *rsa.PublicKey) (*Claims, error) {
+func Validate(token string, key *rsa.PublicKey, expect Expect) (*Claims, error) {
 	if key == nil {
 		return nil, errors.New("sessiontoken: verification key is nil")
 	}
@@ -131,6 +152,17 @@ func Validate(token string, key *rsa.PublicKey) (*Claims, error) {
 	mc, ok := parsed.Claims.(jwt.MapClaims)
 	if !ok {
 		return nil, errors.New("sessiontoken: unexpected claims type")
+	}
+
+	if expect.Issuer != "" {
+		if iss := stringClaim(mc, "iss"); iss != expect.Issuer {
+			return nil, errors.New("sessiontoken: issuer not accepted")
+		}
+	}
+	if expect.Audience != "" {
+		if auds := audienceClaim(mc); len(auds) > 0 && !containsString(auds, expect.Audience) {
+			return nil, errors.New("sessiontoken: audience not accepted (not a platform token)")
+		}
 	}
 
 	out := &Claims{
@@ -155,6 +187,39 @@ func stringClaim(mc jwt.MapClaims, key string) string {
 		return v
 	}
 	return ""
+}
+
+// audienceClaim reads the aud claim in either RFC 7519 wire form: a bare
+// string (what the platform mints) or an array of strings.
+func audienceClaim(mc jwt.MapClaims) []string {
+	switch v := mc["aud"].(type) {
+	case string:
+		if v == "" {
+			return nil
+		}
+		return []string{v}
+	case []string:
+		return v
+	case []interface{}:
+		out := make([]string, 0, len(v))
+		for _, e := range v {
+			if s, ok := e.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func containsString(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }
 
 // unixClaim reads a numeric Unix-seconds claim. JWT numeric claims
