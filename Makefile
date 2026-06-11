@@ -140,7 +140,12 @@ api-diff: ## Fail if the committed lockfile differs from the live spec
 	@diff -u api/openapi.lock.json tmp/openapi.live.json || \
 		(echo "openapi.lock.json out of date; run 'make api-bump' and commit the diff" && exit 1)
 
-ci: lint sqlc-verify test analyze api-diff ## Run everything CI runs
+frontend-types-verify: ## Verify the SPA's generated API types match the lockfile (mirrors sqlc-verify)
+	@cd frontend && $(PNPM) api:generate
+	@git diff --exit-code frontend/src/api/generated/ || \
+		(echo "generated API types out of date; run 'pnpm api:generate' in frontend/ and commit the diff" && exit 1)
+
+ci: lint sqlc-verify test analyze api-diff frontend-types-verify ## Run everything CI runs
 
 # ── Release ──────────────────────────────────────────────────────────
 # Version source of truth is cmd/fc-dev/VERSION (seeded from the Rust

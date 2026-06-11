@@ -109,7 +109,7 @@ function editUser(user: User) {
 	navigateToDetail(`/users/${user.id}`, { edit: "true" });
 }
 
-function getClientName(clientId: string | null): string {
+function getClientName(clientId: string | null | undefined): string {
 	if (!clientId) return "No Client";
 	return getClientLabel(clientId);
 }

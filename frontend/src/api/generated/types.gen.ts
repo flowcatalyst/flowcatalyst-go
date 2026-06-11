@@ -200,6 +200,7 @@ export type AssignApplicationAccessRequest = {
      * A URL to the JSON Schema for this object.
      */
     readonly $schema?: string;
+    allApplications?: boolean;
     applicationIds: Array<string>;
     [key: string]: unknown;
 };
@@ -2277,9 +2278,7 @@ export type SyncSubscriptionsRequest = {
     [key: string]: unknown;
 };
 
-export type Time = {
-    [key: string]: never;
-};
+export type Time = string;
 
 export type UpdateAnchorDomainRequest = {
     /**
@@ -2656,6 +2655,7 @@ export type ApplicationRolesResponseWritable = {
 };
 
 export type AssignApplicationAccessRequestWritable = {
+    allApplications?: boolean;
     applicationIds: Array<string>;
     [key: string]: unknown;
 };

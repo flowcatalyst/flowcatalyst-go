@@ -1,42 +1,50 @@
 import { apiFetch } from "./client";
+import type {
+	ApplicationAccessListResponse as GenApplicationAccessListResponse,
+	ApplicationAccessResponse,
+	BulkImportResponse as GenBulkImportResponse,
+	BulkImportResult,
+	CheckEmailDomainResponse,
+	ClientAccessGrantResponse,
+	PrincipalAvailableApplication,
+	PrincipalAvailableApplicationsResponse,
+	PrincipalListResponse,
+	PrincipalResponse,
+	PrincipalRoleAssignmentDto,
+	RolesAssignedResponse as GenRolesAssignedResponse,
+	SetApplicationAccessResponse,
+} from "./generated";
 
+// Request-side string unions the forms rely on. The generated response
+// types deliberately stay `string` (the spec doesn't carry enums — see
+// docs/frontend-api-types-adoption.md on SDK coordination).
 export type PrincipalType = "USER" | "SERVICE";
 export type IdpType = "INTERNAL" | "OIDC" | "SAML";
 export type PrincipalScope = "ANCHOR" | "PARTNER" | "CLIENT";
 
-export interface User {
-	id: string;
-	type: PrincipalType;
-	scope: PrincipalScope | null;
-	clientId: string | null;
-	name: string;
-	active: boolean;
-	email: string | null;
-	idpType: IdpType | null;
-	roles: string[];
-	isAnchorUser: boolean;
-	grantedClientIds: string[];
-	createdAt: string;
-	updatedAt: string;
-}
-
-export interface UserListResponse {
-	principals: User[];
-	total: number;
-}
+// Response types alias the generated contract (api/openapi.lock.json) so
+// `vue-tsc` fails on backend drift. Aliased under the historical names so
+// pages keep their imports.
+export type User = PrincipalResponse;
+export type UserListResponse = PrincipalListResponse;
+export type ClientAccessGrant = ClientAccessGrantResponse;
+export type RoleAssignment = PrincipalRoleAssignmentDto;
+export type RolesAssignedResponse = GenRolesAssignedResponse;
+export type ApplicationAccessGrant = ApplicationAccessResponse;
+export type ApplicationAccessListResponse = GenApplicationAccessListResponse;
+export type ApplicationAccessAssignedResponse = SetApplicationAccessResponse;
+export type AvailableApplication = PrincipalAvailableApplication;
+export type AvailableApplicationsResponse =
+	PrincipalAvailableApplicationsResponse;
+export type EmailDomainCheckResponse = CheckEmailDomainResponse;
+export type BulkImportResultRow = BulkImportResult;
+export type BulkImportResponse = GenBulkImportResponse;
 
 export interface CreateUserRequest {
 	email: string;
 	password?: string; // Optional - only required for INTERNAL auth users
 	name: string;
 	clientId?: string;
-}
-
-export interface ClientAccessGrant {
-	id: string;
-	clientId: string;
-	grantedAt: string;
-	expiresAt: string | null;
 }
 
 export interface UpdateUserRequest {
@@ -48,66 +56,6 @@ export interface UpdateUserRequest {
 
 /** Explicit-intent change of a user's scope/client association (anchor-gated). */
 export type ClientAssociationMode = "CHANGE_CLIENT" | "TO_PARTNER";
-
-export interface RoleAssignment {
-	id: string;
-	roleName: string;
-	assignmentSource: string;
-	assignedAt: string;
-}
-
-export interface RolesAssignedResponse {
-	roles: RoleAssignment[];
-	added: string[];
-	removed: string[];
-}
-
-export interface ApplicationAccessGrant {
-	applicationId: string;
-	applicationCode: string;
-	applicationName: string;
-}
-
-export interface ApplicationAccessListResponse {
-	applications: ApplicationAccessGrant[];
-	total: number;
-}
-
-export interface ApplicationAccessAssignedResponse {
-	applications: ApplicationAccessGrant[];
-	added: number;
-	removed: number;
-}
-
-export interface AvailableApplication {
-	id: string;
-	code: string;
-	name: string;
-}
-
-export interface AvailableApplicationsResponse {
-	applications: AvailableApplication[];
-}
-
-export interface EmailDomainCheckResponse {
-	domain: string;
-	authProvider: string;
-	isAnchorDomain: boolean;
-	hasIdpConfig: boolean;
-	emailExists: boolean;
-	info: string | null;
-	warning: string | null;
-	/** Scope the user will be created with — ANCHOR / PARTNER / CLIENT. */
-	derivedScope: PrincipalScope;
-	/** True when the form must supply a clientId before submit. */
-	requiresClientId: boolean;
-	/**
-	 * Allow-list of client IDs the form should constrain the picker to.
-	 * Empty when there is no per-domain restriction; the picker can show the
-	 * full active-clients list in that case.
-	 */
-	allowedClientIds: string[];
-}
 
 export interface UserFilters {
 	clientId?: string;
@@ -345,22 +293,10 @@ export const usersApi = {
 	},
 };
 
+// Request shape for bulkImport (hand-rolled: the CSV form always sends
+// roles, so it stays required here even though the wire accepts absent).
 export interface BulkImportUserRow {
 	name: string;
 	email: string;
 	roles: string[];
-}
-
-export interface BulkImportResultRow {
-	row: number;
-	email: string;
-	status: "created" | "exists" | "error";
-	message?: string;
-}
-
-export interface BulkImportResponse {
-	created: number;
-	skipped: number;
-	failed: number;
-	results: BulkImportResultRow[];
 }

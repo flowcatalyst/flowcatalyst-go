@@ -11,6 +11,7 @@ import {
 	type ApplicationAccessGrant,
 	type ApplicationAccessAssignedResponse,
 	type AvailableApplication,
+	type PrincipalScope,
 } from "@/api/users";
 import { clientsApi, type Client } from "@/api/clients";
 import { rolesApi, type Role } from "@/api/roles";
@@ -298,14 +299,18 @@ async function loadAvailableApplications() {
 
 function startEdit() {
 	editName.value = user.value?.name || "";
-	editScope.value = user.value?.scope ?? null;
+	// The wire only ever carries ANCHOR/PARTNER/CLIENT; the generated type
+	// is plain string (spec has no enums).
+	editScope.value = (user.value?.scope ?? null) as PrincipalScope | null;
 	editClientId.value = user.value?.clientId ?? null;
 	editMode.value = true;
 }
 
 function cancelEdit() {
 	editName.value = user.value?.name || "";
-	editScope.value = user.value?.scope ?? null;
+	// The wire only ever carries ANCHOR/PARTNER/CLIENT; the generated type
+	// is plain string (spec has no enums).
+	editScope.value = (user.value?.scope ?? null) as PrincipalScope | null;
 	editClientId.value = user.value?.clientId ?? null;
 	editMode.value = false;
 }

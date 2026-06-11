@@ -13,6 +13,24 @@ const openApiInput =
 
 export default defineConfig({
 	input: openApiInput,
+	parser: {
+		patch: {
+			schemas: {
+				// The backend's jsontime/httpcompat Time types don't declare a
+				// JSON schema, so the spec models them as an empty object — on
+				// the wire they are RFC3339 strings. Patch at generate time so
+				// every createdAt/updatedAt/… field types as `string`. Remove
+				// when the backend gives Time a real schema (an SDK-coordinated
+				// lockfile change).
+				Time: (schema) => {
+					delete schema.additionalProperties;
+					delete schema.properties;
+					schema.type = "string";
+					schema.format = "date-time";
+				},
+			},
+		},
+	},
 	output: {
 		path: "src/api/generated",
 	},
