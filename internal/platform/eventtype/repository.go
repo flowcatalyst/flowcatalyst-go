@@ -3,7 +3,6 @@ package eventtype
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -11,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/shared/repocommon"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/sqlc/dbq"
 	"github.com/flowcatalyst/flowcatalyst-go/pkg/fcsdk/usecasepgx"
 )
@@ -29,26 +29,22 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 
 // FindByID loads an event type with its schema versions.
 func (r *Repository) FindByID(ctx context.Context, id string) (*EventType, error) {
-	row, err := r.q.EventTypeFindByID(ctx, id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
+	res, err := r.q.EventTypeFindByID(ctx, id)
+	row, err := repocommon.One(res, err, "event_types FindByID")
+	if row == nil || err != nil {
+		return nil, err
 	}
-	if err != nil {
-		return nil, fmt.Errorf("event_types FindByID: %w", err)
-	}
-	return r.hydrateOne(ctx, rowToEventType(row))
+	return r.hydrateOne(ctx, rowToEventType(*row))
 }
 
 // FindByCode loads an event type by its unique code.
 func (r *Repository) FindByCode(ctx context.Context, code string) (*EventType, error) {
-	row, err := r.q.EventTypeFindByCode(ctx, code)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
+	res, err := r.q.EventTypeFindByCode(ctx, code)
+	row, err := repocommon.One(res, err, "event_types FindByCode")
+	if row == nil || err != nil {
+		return nil, err
 	}
-	if err != nil {
-		return nil, fmt.Errorf("event_types FindByCode: %w", err)
-	}
-	return r.hydrateOne(ctx, rowToEventType(row))
+	return r.hydrateOne(ctx, rowToEventType(*row))
 }
 
 // FindByApplication lists every event type whose first code segment
@@ -71,48 +67,28 @@ func (r *Repository) FindWithFilters(
 	ctx context.Context,
 	application, clientID, status, subdomain, aggregate *string,
 ) ([]EventType, error) {
-	var conds []string
-	var args []any
-	add := func(col string, v *string) {
-		if v == nil {
-			return
-		}
-		args = append(args, *v)
-		conds = append(conds, fmt.Sprintf("%s = $%d", col, len(args)))
-	}
-	add("application", application)
-	add("status", status)
-	add("subdomain", subdomain)
-	add("aggregate", aggregate)
+	var f repocommon.Filter
+	f.EqPtr("application", application)
+	f.EqPtr("status", status)
+	f.EqPtr("subdomain", subdomain)
+	f.EqPtr("aggregate", aggregate)
 	_ = clientID // not a column on msg_event_types
 
 	q := `SELECT id, code, name, description, status, source, client_scoped,
 		         application, subdomain, aggregate, created_at, updated_at
-		  FROM msg_event_types`
-	if len(conds) > 0 {
-		q += " WHERE " + strings.Join(conds, " AND ")
-	}
-	q += " ORDER BY code ASC"
+		  FROM msg_event_types` + f.Where() + " ORDER BY code ASC"
 
-	rows, err := r.pool.Query(ctx, q, args...)
+	rows, err := r.pool.Query(ctx, q, f.Args()...)
 	if err != nil {
 		return nil, fmt.Errorf("event_types FindWithFilters: %w", err)
 	}
-	defer rows.Close()
-	var bare []EventType
-	for rows.Next() {
-		var row dbq.MsgEventType
-		if err := rows.Scan(
-			&row.ID, &row.Code, &row.Name, &row.Description, &row.Status, &row.Source,
-			&row.ClientScoped, &row.Application, &row.Subdomain, &row.Aggregate,
-			&row.CreatedAt, &row.UpdatedAt,
-		); err != nil {
-			return nil, err
-		}
-		bare = append(bare, *rowToEventType(row))
-	}
-	if err := rows.Err(); err != nil {
+	collected, err := pgx.CollectRows(rows, pgx.RowToStructByName[dbq.MsgEventType])
+	if err != nil {
 		return nil, err
+	}
+	var bare []EventType
+	for _, row := range collected {
+		bare = append(bare, *rowToEventType(row))
 	}
 	return r.hydrateAll(ctx, bare)
 }

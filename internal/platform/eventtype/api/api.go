@@ -13,6 +13,7 @@ import (
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/eventtype"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/eventtype/operations"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/shared/apicommon"
+	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/shared/apiroute"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/shared/auth"
 	"github.com/flowcatalyst/flowcatalyst-go/internal/platform/shared/httperror"
 	"github.com/flowcatalyst/flowcatalyst-go/pkg/fcsdk/usecase"
@@ -31,79 +32,17 @@ const tag = "event-types"
 // Routes match the existing Rust eventtype/api.rs exactly (path,
 // method, status code).
 func Register(api huma.API, s *State) {
-	huma.Register(api, huma.Operation{
-		OperationID:   "listEventTypes",
-		Method:        http.MethodGet,
-		Path:          "/api/event-types",
-		Summary:       "List event types",
-		Tags:          []string{tag},
-		DefaultStatus: http.StatusOK,
-	}, s.list)
-
-	huma.Register(api, huma.Operation{
-		OperationID:   "createEventType",
-		Method:        http.MethodPost,
-		Path:          "/api/event-types",
-		Summary:       "Create an event type",
-		Tags:          []string{tag},
-		DefaultStatus: http.StatusCreated,
-	}, s.create)
-
-	huma.Register(api, huma.Operation{
-		OperationID:   "getEventType",
-		Method:        http.MethodGet,
-		Path:          "/api/event-types/{id}",
-		Summary:       "Get an event type by id",
-		Tags:          []string{tag},
-		DefaultStatus: http.StatusOK,
-	}, s.getByID)
-
-	huma.Register(api, huma.Operation{
-		OperationID:   "getEventTypeByCode",
-		Method:        http.MethodGet,
-		Path:          "/api/event-types/by-code/{code}",
-		Summary:       "Get an event type by code",
-		Tags:          []string{tag},
-		DefaultStatus: http.StatusOK,
-	}, s.getByCode)
-
-	huma.Register(api, huma.Operation{
-		OperationID:   "updateEventType",
-		Method:        http.MethodPut,
-		Path:          "/api/event-types/{id}",
-		Summary:       "Update an event type",
-		Tags:          []string{tag},
-		DefaultStatus: http.StatusNoContent,
-	}, s.update)
-
-	huma.Register(api, huma.Operation{
-		OperationID:   "deleteEventType",
-		Method:        http.MethodDelete,
-		Path:          "/api/event-types/{id}",
-		Summary:       "Archive an event type",
-		Tags:          []string{tag},
-		DefaultStatus: http.StatusNoContent,
-	}, s.delete)
-
-	huma.Register(api, huma.Operation{
-		OperationID:   "addEventTypeSchema",
-		Method:        http.MethodPost,
-		Path:          "/api/event-types/{id}/schemas",
-		Summary:       "Add a schema version to an event type (Go-historical alias)",
-		Tags:          []string{tag},
-		DefaultStatus: http.StatusOK,
-	}, s.addSchema)
-
+	g := apiroute.New(api, tag)
+	apiroute.Get(g, "listEventTypes", "/api/event-types", "List event types", s.list)
+	apiroute.Post(g, "createEventType", "/api/event-types", "Create an event type", http.StatusCreated, s.create)
+	apiroute.Get(g, "getEventType", "/api/event-types/{id}", "Get an event type by id", s.getByID)
+	apiroute.Get(g, "getEventTypeByCode", "/api/event-types/by-code/{code}", "Get an event type by code", s.getByCode)
+	apiroute.Put(g, "updateEventType", "/api/event-types/{id}", "Update an event type", http.StatusNoContent, s.update)
+	apiroute.Delete(g, "deleteEventType", "/api/event-types/{id}", "Archive an event type", http.StatusNoContent, s.delete)
+	apiroute.Post(g, "addEventTypeSchema", "/api/event-types/{id}/schemas", "Add a schema version to an event type (Go-historical alias)", http.StatusOK, s.addSchema)
 	// /versions is the Rust-canonical path. Same handler; both paths
 	// remain registered so existing SPA clients on /schemas keep working.
-	huma.Register(api, huma.Operation{
-		OperationID:   "addEventTypeVersion",
-		Method:        http.MethodPost,
-		Path:          "/api/event-types/{id}/versions",
-		Summary:       "Add a schema version to an event type",
-		Tags:          []string{tag},
-		DefaultStatus: http.StatusOK,
-	}, s.addSchema)
+	apiroute.Post(g, "addEventTypeVersion", "/api/event-types/{id}/versions", "Add a schema version to an event type", http.StatusOK, s.addSchema)
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────
@@ -116,32 +55,17 @@ type listInput struct {
 	Aggregate   string `query:"aggregate" doc:"Filter by aggregate"`
 }
 
-type listOutput struct {
-	Body EventTypeListResponse
-}
-
-func (s *State) list(ctx context.Context, in *listInput) (*listOutput, error) {
+func (s *State) list(ctx context.Context, in *listInput) (*apicommon.Out[EventTypeListResponse], error) {
 	ac := auth.FromContext(ctx)
 	if err := auth.CanReadEventTypes(ac); err != nil {
 		return nil, err
 	}
 
-	var application, clientID, status, subdomain, aggregate *string
-	if in.Application != "" {
-		application = &in.Application
-	}
-	if in.ClientID != "" {
-		clientID = &in.ClientID
-	}
-	if in.Status != "" {
-		status = &in.Status
-	}
-	if in.Subdomain != "" {
-		subdomain = &in.Subdomain
-	}
-	if in.Aggregate != "" {
-		aggregate = &in.Aggregate
-	}
+	application := apicommon.OptStr(in.Application)
+	clientID := apicommon.OptStr(in.ClientID)
+	status := apicommon.OptStr(in.Status)
+	subdomain := apicommon.OptStr(in.Subdomain)
+	aggregate := apicommon.OptStr(in.Aggregate)
 	if application == nil && clientID == nil && status == nil && subdomain == nil && aggregate == nil {
 		def := "CURRENT"
 		status = &def
@@ -151,24 +75,16 @@ func (s *State) list(ctx context.Context, in *listInput) (*listOutput, error) {
 	if err != nil {
 		return nil, usecase.Internal("REPO", "find_with_filters failed", err)
 	}
-	out := make([]EventTypeResponse, 0, len(rows))
-	for _, et := range rows {
-		if et.ClientID == nil || ac.CanAccessClient(*et.ClientID) {
-			out = append(out, fromEntity(&et))
-		}
-	}
-	return &listOutput{Body: EventTypeListResponse{Items: out}}, nil
+	visible := auth.FilterClientScoped(ac, rows, func(et *eventtype.EventType) *string { return et.ClientID })
+	out := apicommon.MapSlice(visible, fromEntity)
+	return &apicommon.Out[EventTypeListResponse]{Body: EventTypeListResponse{Items: out}}, nil
 }
 
 type getByIDInput struct {
 	ID string `path:"id" doc:"Event type id (TSID)"`
 }
 
-type getOutput struct {
-	Body EventTypeResponse
-}
-
-func (s *State) getByID(ctx context.Context, in *getByIDInput) (*getOutput, error) {
+func (s *State) getByID(ctx context.Context, in *getByIDInput) (*apicommon.Out[EventTypeResponse], error) {
 	ac := auth.FromContext(ctx)
 	if err := auth.CanReadEventTypes(ac); err != nil {
 		return nil, err
@@ -183,14 +99,14 @@ func (s *State) getByID(ctx context.Context, in *getByIDInput) (*getOutput, erro
 	if et.ClientID != nil && !ac.CanAccessClient(*et.ClientID) {
 		return nil, httperror.Forbidden("No access to this event type")
 	}
-	return &getOutput{Body: fromEntity(et)}, nil
+	return &apicommon.Out[EventTypeResponse]{Body: fromEntity(et)}, nil
 }
 
 type getByCodeInput struct {
 	Code string `path:"code" doc:"Event type code (e.g. platform:iam:user:created)"`
 }
 
-func (s *State) getByCode(ctx context.Context, in *getByCodeInput) (*getOutput, error) {
+func (s *State) getByCode(ctx context.Context, in *getByCodeInput) (*apicommon.Out[EventTypeResponse], error) {
 	ac := auth.FromContext(ctx)
 	if err := auth.CanReadEventTypes(ac); err != nil {
 		return nil, err
@@ -205,18 +121,10 @@ func (s *State) getByCode(ctx context.Context, in *getByCodeInput) (*getOutput, 
 	if et.ClientID != nil && !ac.CanAccessClient(*et.ClientID) {
 		return nil, httperror.Forbidden("No access to this event type")
 	}
-	return &getOutput{Body: fromEntity(et)}, nil
+	return &apicommon.Out[EventTypeResponse]{Body: fromEntity(et)}, nil
 }
 
-type createInput struct {
-	Body CreateEventTypeRequest
-}
-
-type createOutput struct {
-	Body apicommon.CreatedResponse
-}
-
-func (s *State) create(ctx context.Context, in *createInput) (*createOutput, error) {
+func (s *State) create(ctx context.Context, in *apicommon.In[CreateEventTypeRequest]) (*apicommon.Out[apicommon.CreatedResponse], error) {
 	ac := auth.FromContext(ctx)
 	if err := auth.CanWriteEventTypes(ac); err != nil {
 		return nil, err
@@ -234,7 +142,7 @@ func (s *State) create(ctx context.Context, in *createInput) (*createOutput, err
 	if err != nil {
 		return nil, err
 	}
-	return &createOutput{Body: apicommon.CreatedResponse{ID: committed.Event().EventTypeID}}, nil
+	return &apicommon.Out[apicommon.CreatedResponse]{Body: apicommon.CreatedResponse{ID: committed.Event().EventTypeID}}, nil
 }
 
 // requireScopeByID loads the event type and enforces per-resource scope (A2)
@@ -256,9 +164,7 @@ type updateInput struct {
 	Body UpdateEventTypeRequest
 }
 
-type emptyOutput struct{}
-
-func (s *State) update(ctx context.Context, in *updateInput) (*emptyOutput, error) {
+func (s *State) update(ctx context.Context, in *updateInput) (*apicommon.Empty, error) {
 	ac := auth.FromContext(ctx)
 	if err := auth.CanWriteEventTypes(ac); err != nil {
 		return nil, err
@@ -270,14 +176,10 @@ func (s *State) update(ctx context.Context, in *updateInput) (*emptyOutput, erro
 	if _, err := operations.UpdateEventType(ctx, s.Repo, s.UoW, in.Body.toCommand(in.ID), ec); err != nil {
 		return nil, err
 	}
-	return &emptyOutput{}, nil
+	return &apicommon.Empty{}, nil
 }
 
-type deleteInput struct {
-	ID string `path:"id"`
-}
-
-func (s *State) delete(ctx context.Context, in *deleteInput) (*emptyOutput, error) {
+func (s *State) delete(ctx context.Context, in *apicommon.IDInput) (*apicommon.Empty, error) {
 	ac := auth.FromContext(ctx)
 	if err := auth.CanDeleteEventTypes(ac); err != nil {
 		return nil, err
@@ -289,7 +191,7 @@ func (s *State) delete(ctx context.Context, in *deleteInput) (*emptyOutput, erro
 	if _, err := operations.DeleteEventType(ctx, s.Repo, s.UoW, operations.DeleteCommand{ID: in.ID}, ec); err != nil {
 		return nil, err
 	}
-	return &emptyOutput{}, nil
+	return &apicommon.Empty{}, nil
 }
 
 type addSchemaInput struct {
@@ -297,7 +199,7 @@ type addSchemaInput struct {
 	Body AddSchemaRequest
 }
 
-func (s *State) addSchema(ctx context.Context, in *addSchemaInput) (*getOutput, error) {
+func (s *State) addSchema(ctx context.Context, in *addSchemaInput) (*apicommon.Out[EventTypeResponse], error) {
 	ac := auth.FromContext(ctx)
 	if err := auth.CanWriteEventTypes(ac); err != nil {
 		return nil, err
@@ -317,5 +219,5 @@ func (s *State) addSchema(ctx context.Context, in *addSchemaInput) (*getOutput, 
 		return nil, httperror.NotFound("EventType", in.ID)
 	}
 	// Return the updated event type (1:1 with Rust add_schema_version → EventTypeResponse).
-	return &getOutput{Body: fromEntity(et)}, nil
+	return &apicommon.Out[EventTypeResponse]{Body: fromEntity(et)}, nil
 }
