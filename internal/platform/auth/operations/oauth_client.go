@@ -326,14 +326,3 @@ func generateSecret() (plaintext, ref string, err error) {
 	return plaintext, ref, nil
 }
 
-func stashSecret(clientID, plaintext string) { secretStash.Store(clientID, plaintext) }
-
-// PopStashedSecret returns the once-readable plaintext for clientID.
-// Called by the HTTP handler immediately after the use case succeeds.
-func PopStashedSecret(clientID string) (string, bool) {
-	v, ok := secretStash.LoadAndDelete(clientID)
-	if !ok {
-		return "", false
-	}
-	return v.(string), true
-}
