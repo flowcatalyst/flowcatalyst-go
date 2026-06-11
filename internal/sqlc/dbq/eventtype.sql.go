@@ -22,7 +22,7 @@ func (q *Queries) EventTypeDelete(ctx context.Context, id string) error {
 
 const eventTypeFindByApplication = `-- name: EventTypeFindByApplication :many
 SELECT id, code, name, description, status, source, client_scoped,
-       application, subdomain, aggregate, created_at, updated_at
+       application, subdomain, aggregate, created_at, updated_at, created_by
 FROM msg_event_types
 WHERE application = $1
 ORDER BY code
@@ -50,6 +50,7 @@ func (q *Queries) EventTypeFindByApplication(ctx context.Context, application st
 			&i.Aggregate,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.CreatedBy,
 		); err != nil {
 			return nil, err
 		}
@@ -63,7 +64,7 @@ func (q *Queries) EventTypeFindByApplication(ctx context.Context, application st
 
 const eventTypeFindByCode = `-- name: EventTypeFindByCode :one
 SELECT id, code, name, description, status, source, client_scoped,
-       application, subdomain, aggregate, created_at, updated_at
+       application, subdomain, aggregate, created_at, updated_at, created_by
 FROM msg_event_types
 WHERE code = $1
 `
@@ -84,6 +85,7 @@ func (q *Queries) EventTypeFindByCode(ctx context.Context, code string) (MsgEven
 		&i.Aggregate,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.CreatedBy,
 	)
 	return i, err
 }
@@ -91,7 +93,7 @@ func (q *Queries) EventTypeFindByCode(ctx context.Context, code string) (MsgEven
 const eventTypeFindByID = `-- name: EventTypeFindByID :one
 
 SELECT id, code, name, description, status, source, client_scoped,
-       application, subdomain, aggregate, created_at, updated_at
+       application, subdomain, aggregate, created_at, updated_at, created_by
 FROM msg_event_types
 WHERE id = $1
 `
@@ -115,6 +117,7 @@ func (q *Queries) EventTypeFindByID(ctx context.Context, id string) (MsgEventTyp
 		&i.Aggregate,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.CreatedBy,
 	)
 	return i, err
 }
@@ -122,8 +125,8 @@ func (q *Queries) EventTypeFindByID(ctx context.Context, id string) (MsgEventTyp
 const eventTypeUpsertByCode = `-- name: EventTypeUpsertByCode :exec
 INSERT INTO msg_event_types
     (id, code, name, description, status, source, client_scoped,
-     application, subdomain, aggregate, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+     application, subdomain, aggregate, created_by, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 ON CONFLICT (code) DO UPDATE SET
     name = EXCLUDED.name,
     description = EXCLUDED.description,
@@ -144,6 +147,7 @@ type EventTypeUpsertByCodeParams struct {
 	Application  string    `db:"application"`
 	Subdomain    string    `db:"subdomain"`
 	Aggregate    string    `db:"aggregate"`
+	CreatedBy    *string   `db:"created_by"`
 	CreatedAt    time.Time `db:"created_at"`
 	UpdatedAt    time.Time `db:"updated_at"`
 }
@@ -160,6 +164,7 @@ func (q *Queries) EventTypeUpsertByCode(ctx context.Context, arg EventTypeUpsert
 		arg.Application,
 		arg.Subdomain,
 		arg.Aggregate,
+		arg.CreatedBy,
 		arg.CreatedAt,
 		arg.UpdatedAt,
 	)
@@ -169,8 +174,8 @@ func (q *Queries) EventTypeUpsertByCode(ctx context.Context, arg EventTypeUpsert
 const eventTypeUpsertByID = `-- name: EventTypeUpsertByID :exec
 INSERT INTO msg_event_types
     (id, code, name, description, status, source, client_scoped,
-     application, subdomain, aggregate, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+     application, subdomain, aggregate, created_by, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 ON CONFLICT (id) DO UPDATE SET
     code = EXCLUDED.code,
     name = EXCLUDED.name,
@@ -195,6 +200,7 @@ type EventTypeUpsertByIDParams struct {
 	Application  string    `db:"application"`
 	Subdomain    string    `db:"subdomain"`
 	Aggregate    string    `db:"aggregate"`
+	CreatedBy    *string   `db:"created_by"`
 	CreatedAt    time.Time `db:"created_at"`
 	UpdatedAt    time.Time `db:"updated_at"`
 }
@@ -211,6 +217,7 @@ func (q *Queries) EventTypeUpsertByID(ctx context.Context, arg EventTypeUpsertBy
 		arg.Application,
 		arg.Subdomain,
 		arg.Aggregate,
+		arg.CreatedBy,
 		arg.CreatedAt,
 		arg.UpdatedAt,
 	)

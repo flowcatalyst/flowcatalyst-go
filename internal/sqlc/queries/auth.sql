@@ -160,33 +160,34 @@ ON CONFLICT (id) DO UPDATE SET
 DELETE FROM tnt_client_auth_configs WHERE id = $1;
 
 -- ── IdpRoleMapping (oauth_idp_role_mappings) ─────────────────────────
--- Schema columns: id, idp_role_name, internal_role_name, created_at,
--- updated_at. The Go entity carries an `IdpType` field that has no
--- backing column today (matches Rust, where the column was dropped);
--- the field is ignored on persist and reads back as "".
+-- idp_type was added Go-side in migration 035 (Rust had dropped the
+-- column, so its rows read back NULL). It is persisted and echoed, but
+-- FindByIdpRole deliberately does NOT filter on it — pre-035 rows have
+-- NULL idp_type and live mappings must keep matching.
 
 -- name: IdpRoleMappingFindByID :one
-SELECT id, idp_role_name, internal_role_name, created_at, updated_at
+SELECT id, idp_role_name, internal_role_name, created_at, updated_at, idp_type
 FROM oauth_idp_role_mappings
 WHERE id = $1;
 
 -- name: IdpRoleMappingFindByIdpRole :many
-SELECT id, idp_role_name, internal_role_name, created_at, updated_at
+SELECT id, idp_role_name, internal_role_name, created_at, updated_at, idp_type
 FROM oauth_idp_role_mappings
 WHERE idp_role_name = $1
 ORDER BY internal_role_name;
 
 -- name: IdpRoleMappingFindAll :many
-SELECT id, idp_role_name, internal_role_name, created_at, updated_at
+SELECT id, idp_role_name, internal_role_name, created_at, updated_at, idp_type
 FROM oauth_idp_role_mappings
 ORDER BY idp_role_name;
 
 -- name: IdpRoleMappingUpsert :exec
 INSERT INTO oauth_idp_role_mappings
-    (id, idp_role_name, internal_role_name, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5)
+    (id, idp_role_name, internal_role_name, idp_type, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (id) DO UPDATE SET
     internal_role_name = EXCLUDED.internal_role_name,
+    idp_type = EXCLUDED.idp_type,
     updated_at = EXCLUDED.updated_at;
 
 -- name: IdpRoleMappingDelete :exec

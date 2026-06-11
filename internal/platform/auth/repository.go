@@ -513,10 +513,10 @@ func stringSliceOrEmpty(s []string) []string {
 
 // ── IdpRoleMapping repo ───────────────────────────────────────────────────
 //
-// Schema has only id, idp_role_name, internal_role_name. The Go entity's
-// IdpType field has no backing column (matches Rust — column was dropped);
-// it's ignored on persist and reads back as "" so the existing API shape
-// still works.
+// idp_type was added Go-side in migration 035 (Rust had dropped the
+// column); it round-trips on persist/read, but FindByIdpRole deliberately
+// does not filter on it — pre-035 rows have NULL idp_type and live
+// mappings must keep matching.
 
 type IdpRoleMappingRepo struct{ q *dbq.Queries }
 
@@ -531,8 +531,9 @@ func (r *IdpRoleMappingRepo) FindByID(ctx context.Context, id string) (*IdpRoleM
 	return rowToIdpMapping(row), nil
 }
 
-// FindByIdpRole filters by idp_role_name only — the idp_type argument
-// is accepted for API compat but ignored (column doesn't exist).
+// FindByIdpRole filters by idp_role_name only — the idp_type argument is
+// accepted for API compat but deliberately not filtered on: rows created
+// before migration 035 carry NULL idp_type and must keep matching.
 func (r *IdpRoleMappingRepo) FindByIdpRole(ctx context.Context, _idpType, idpRoleName string) ([]IdpRoleMapping, error) {
 	rows, err := r.q.IdpRoleMappingFindByIdpRole(ctx, idpRoleName)
 	if err != nil {
@@ -558,10 +559,15 @@ func (r *IdpRoleMappingRepo) FindAll(ctx context.Context) ([]IdpRoleMapping, err
 }
 
 func (r *IdpRoleMappingRepo) Persist(ctx context.Context, m *IdpRoleMapping, tx *usecasepgx.DbTx) error {
+	var idpType *string
+	if m.IdpType != "" {
+		idpType = &m.IdpType
+	}
 	return r.q.WithTx(tx.Inner()).IdpRoleMappingUpsert(ctx, dbq.IdpRoleMappingUpsertParams{
 		ID:               m.ID,
 		IdpRoleName:      m.IdpRoleName,
 		InternalRoleName: m.PlatformRoleName,
+		IdpType:          idpType,
 		CreatedAt:        m.CreatedAt,
 		UpdatedAt:        time.Now().UTC(),
 	})
@@ -572,9 +578,13 @@ func (r *IdpRoleMappingRepo) Delete(ctx context.Context, m *IdpRoleMapping, tx *
 }
 
 func rowToIdpMapping(row dbq.OauthIdpRoleMapping) *IdpRoleMapping {
+	idpType := ""
+	if row.IdpType != nil {
+		idpType = *row.IdpType
+	}
 	return &IdpRoleMapping{
 		ID:               row.ID,
-		IdpType:          "", // no backing column
+		IdpType:          idpType,
 		IdpRoleName:      row.IdpRoleName,
 		PlatformRoleName: row.InternalRoleName,
 		CreatedAt:        row.CreatedAt,

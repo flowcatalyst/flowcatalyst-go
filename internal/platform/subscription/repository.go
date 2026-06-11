@@ -80,7 +80,7 @@ func (r *Repository) FindWithFilters(ctx context.Context, status, clientID *stri
 		client_identifier, client_scoped, target, queue, source, status,
 		max_age_seconds, dispatch_pool_id, dispatch_pool_code, delay_seconds, sequence,
 		mode, timeout_seconds, max_retries, service_account_id, data_only,
-		created_at, updated_at, connection_id FROM msg_subscriptions` + f.Where() + ` ORDER BY code`
+		created_by, created_at, updated_at, connection_id FROM msg_subscriptions` + f.Where() + ` ORDER BY code`
 
 	rows, err := r.pool.Query(ctx, q, f.Args()...)
 	if err != nil {
@@ -106,7 +106,7 @@ func (r *Repository) FindByApplicationCode(ctx context.Context, appCode string) 
 		client_identifier, client_scoped, target, queue, source, status,
 		max_age_seconds, dispatch_pool_id, dispatch_pool_code, delay_seconds, sequence,
 		mode, timeout_seconds, max_retries, service_account_id, data_only,
-		created_at, updated_at, connection_id FROM msg_subscriptions
+		created_by, created_at, updated_at, connection_id FROM msg_subscriptions
 		WHERE application_code = $1 ORDER BY code`
 	rows, err := r.pool.Query(ctx, baseSelect, appCode)
 	if err != nil {
@@ -151,6 +151,7 @@ func (r *Repository) Persist(ctx context.Context, s *Subscription, tx *usecasepg
 		MaxRetries:       s.MaxRetries,
 		ServiceAccountID: s.ServiceAccountID,
 		DataOnly:         s.DataOnly,
+		CreatedBy:        s.CreatedBy,
 		CreatedAt:        s.CreatedAt,
 		UpdatedAt:        time.Now().UTC(),
 	}); err != nil {
@@ -272,6 +273,7 @@ func rowToSubscription(row dbq.MsgSubscription) *Subscription {
 		MaxRetries:       row.MaxRetries,
 		ServiceAccountID: row.ServiceAccountID,
 		DataOnly:         row.DataOnly,
+		CreatedBy:        row.CreatedBy,
 		CreatedAt:        row.CreatedAt,
 		UpdatedAt:        row.UpdatedAt,
 		EventTypes:       []EventTypeBinding{},

@@ -75,7 +75,7 @@ func (r *Repository) FindWithFilters(
 	_ = clientID // not a column on msg_event_types
 
 	q := `SELECT id, code, name, description, status, source, client_scoped,
-		         application, subdomain, aggregate, created_at, updated_at
+		         application, subdomain, aggregate, created_by, created_at, updated_at
 		  FROM msg_event_types` + f.Where() + " ORDER BY code ASC"
 
 	rows, err := r.pool.Query(ctx, q, f.Args()...)
@@ -214,6 +214,7 @@ func rowToEventType(row dbq.MsgEventType) *EventType {
 		Application:  row.Application,
 		Subdomain:    row.Subdomain,
 		Aggregate:    row.Aggregate,
+		CreatedBy:    row.CreatedBy,
 		CreatedAt:    row.CreatedAt,
 		UpdatedAt:    row.UpdatedAt,
 	}
@@ -238,6 +239,7 @@ func eventTypeUpsertParams(et *EventType) dbq.EventTypeUpsertByIDParams {
 		Application:  et.Application,
 		Subdomain:    et.Subdomain,
 		Aggregate:    et.Aggregate,
+		CreatedBy:    et.CreatedBy,
 		CreatedAt:    et.CreatedAt,
 		UpdatedAt:    time.Now().UTC(),
 	}

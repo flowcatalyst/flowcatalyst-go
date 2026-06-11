@@ -290,6 +290,8 @@ type IamServiceAccount struct {
 	LastUsedAt                 *time.Time `db:"last_used_at"`
 	CreatedAt                  time.Time  `db:"created_at"`
 	UpdatedAt                  time.Time  `db:"updated_at"`
+	Scope                      *string    `db:"scope"`
+	ClientIds                  []string   `db:"client_ids"`
 }
 
 type IamUserMfaMethod struct {
@@ -488,6 +490,7 @@ type MsgEventType struct {
 	Aggregate    string    `db:"aggregate"`
 	CreatedAt    time.Time `db:"created_at"`
 	UpdatedAt    time.Time `db:"updated_at"`
+	CreatedBy    *string   `db:"created_by"`
 }
 
 type MsgEventTypeSpecVersion struct {
@@ -618,6 +621,7 @@ type MsgSubscription struct {
 	CreatedAt        time.Time `db:"created_at"`
 	UpdatedAt        time.Time `db:"updated_at"`
 	ConnectionID     *string   `db:"connection_id"`
+	CreatedBy        *string   `db:"created_by"`
 }
 
 type MsgSubscriptionCustomConfig struct {
@@ -700,6 +704,7 @@ type OauthIdpRoleMapping struct {
 	InternalRoleName string    `db:"internal_role_name"`
 	CreatedAt        time.Time `db:"created_at"`
 	UpdatedAt        time.Time `db:"updated_at"`
+	IdpType          *string   `db:"idp_type"`
 }
 
 type OauthOidcLoginState struct {

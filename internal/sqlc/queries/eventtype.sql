@@ -4,19 +4,19 @@
 
 -- name: EventTypeFindByID :one
 SELECT id, code, name, description, status, source, client_scoped,
-       application, subdomain, aggregate, created_at, updated_at
+       application, subdomain, aggregate, created_at, updated_at, created_by
 FROM msg_event_types
 WHERE id = $1;
 
 -- name: EventTypeFindByCode :one
 SELECT id, code, name, description, status, source, client_scoped,
-       application, subdomain, aggregate, created_at, updated_at
+       application, subdomain, aggregate, created_at, updated_at, created_by
 FROM msg_event_types
 WHERE code = $1;
 
 -- name: EventTypeFindByApplication :many
 SELECT id, code, name, description, status, source, client_scoped,
-       application, subdomain, aggregate, created_at, updated_at
+       application, subdomain, aggregate, created_at, updated_at, created_by
 FROM msg_event_types
 WHERE application = $1
 ORDER BY code;
@@ -24,8 +24,8 @@ ORDER BY code;
 -- name: EventTypeUpsertByID :exec
 INSERT INTO msg_event_types
     (id, code, name, description, status, source, client_scoped,
-     application, subdomain, aggregate, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+     application, subdomain, aggregate, created_by, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 ON CONFLICT (id) DO UPDATE SET
     code = EXCLUDED.code,
     name = EXCLUDED.name,
@@ -41,8 +41,8 @@ ON CONFLICT (id) DO UPDATE SET
 -- name: EventTypeUpsertByCode :exec
 INSERT INTO msg_event_types
     (id, code, name, description, status, source, client_scoped,
-     application, subdomain, aggregate, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+     application, subdomain, aggregate, created_by, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 ON CONFLICT (code) DO UPDATE SET
     name = EXCLUDED.name,
     description = EXCLUDED.description,

@@ -23,7 +23,8 @@ const serviceAccountFindAll = `-- name: ServiceAccountFindAll :many
 SELECT id, code, name, description, application_id, active,
        wh_auth_type, wh_auth_token_ref, wh_signing_secret_ref,
        wh_signing_algorithm, wh_credentials_created_at,
-       wh_credentials_regenerated_at, last_used_at, created_at, updated_at
+       wh_credentials_regenerated_at, last_used_at, created_at, updated_at,
+       scope, client_ids
 FROM iam_service_accounts
 ORDER BY code
 `
@@ -53,6 +54,8 @@ func (q *Queries) ServiceAccountFindAll(ctx context.Context) ([]IamServiceAccoun
 			&i.LastUsedAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Scope,
+			&i.ClientIds,
 		); err != nil {
 			return nil, err
 		}
@@ -68,7 +71,8 @@ const serviceAccountFindByCode = `-- name: ServiceAccountFindByCode :one
 SELECT id, code, name, description, application_id, active,
        wh_auth_type, wh_auth_token_ref, wh_signing_secret_ref,
        wh_signing_algorithm, wh_credentials_created_at,
-       wh_credentials_regenerated_at, last_used_at, created_at, updated_at
+       wh_credentials_regenerated_at, last_used_at, created_at, updated_at,
+       scope, client_ids
 FROM iam_service_accounts
 WHERE code = $1
 `
@@ -92,6 +96,8 @@ func (q *Queries) ServiceAccountFindByCode(ctx context.Context, code string) (Ia
 		&i.LastUsedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Scope,
+		&i.ClientIds,
 	)
 	return i, err
 }
@@ -101,7 +107,8 @@ const serviceAccountFindByID = `-- name: ServiceAccountFindByID :one
 SELECT id, code, name, description, application_id, active,
        wh_auth_type, wh_auth_token_ref, wh_signing_secret_ref,
        wh_signing_algorithm, wh_credentials_created_at,
-       wh_credentials_regenerated_at, last_used_at, created_at, updated_at
+       wh_credentials_regenerated_at, last_used_at, created_at, updated_at,
+       scope, client_ids
 FROM iam_service_accounts
 WHERE id = $1
 `
@@ -129,21 +136,25 @@ func (q *Queries) ServiceAccountFindByID(ctx context.Context, id string) (IamSer
 		&i.LastUsedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Scope,
+		&i.ClientIds,
 	)
 	return i, err
 }
 
 const serviceAccountUpsert = `-- name: ServiceAccountUpsert :exec
 INSERT INTO iam_service_accounts
-    (id, code, name, description, application_id, active,
+    (id, code, name, description, application_id, scope, client_ids, active,
      wh_auth_type, wh_auth_token_ref, wh_signing_secret_ref,
      wh_signing_algorithm, wh_credentials_created_at,
      wh_credentials_regenerated_at, last_used_at, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 ON CONFLICT (id) DO UPDATE SET
     name = EXCLUDED.name,
     description = EXCLUDED.description,
     application_id = EXCLUDED.application_id,
+    scope = EXCLUDED.scope,
+    client_ids = EXCLUDED.client_ids,
     active = EXCLUDED.active,
     wh_auth_type = EXCLUDED.wh_auth_type,
     wh_auth_token_ref = EXCLUDED.wh_auth_token_ref,
@@ -161,6 +172,8 @@ type ServiceAccountUpsertParams struct {
 	Name                       string     `db:"name"`
 	Description                *string    `db:"description"`
 	ApplicationID              *string    `db:"application_id"`
+	Scope                      *string    `db:"scope"`
+	ClientIds                  []string   `db:"client_ids"`
 	Active                     bool       `db:"active"`
 	WhAuthType                 *string    `db:"wh_auth_type"`
 	WhAuthTokenRef             *string    `db:"wh_auth_token_ref"`
@@ -180,6 +193,8 @@ func (q *Queries) ServiceAccountUpsert(ctx context.Context, arg ServiceAccountUp
 		arg.Name,
 		arg.Description,
 		arg.ApplicationID,
+		arg.Scope,
+		arg.ClientIds,
 		arg.Active,
 		arg.WhAuthType,
 		arg.WhAuthTokenRef,

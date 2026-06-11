@@ -65,12 +65,10 @@ func TestCreateEventType_HappyPath(t *testing.T) {
 	require.NotNil(t, got)
 	assert.Equal(t, eventtype.StatusCurrent, got.Status)
 	assert.Equal(t, eventtype.SourceUI, got.Source)
-	// KNOWN GAP: create.go sets CreatedBy on the in-memory aggregate, but
-	// msg_event_types has no created_by column — the repository silently
-	// drops it at the persist boundary (cf. the process tags fix), so a
-	// reload always yields nil. Pin actual behavior; flip this assert to
-	// NotNil + Equal(ec.PrincipalID) when the column lands.
-	assert.Nil(t, got.CreatedBy, "created_by is not persisted (no DB column)")
+	// created_by persists since migration 035 (Rust never wrote it; its
+	// rows read back NULL).
+	require.NotNil(t, got.CreatedBy)
+	assert.Equal(t, ec.PrincipalID, *got.CreatedBy)
 	require.Len(t, got.SpecVersions, 1, "schema in create cmd must mint version 1.0")
 	assert.Equal(t, "1.0", got.SpecVersions[0].Version)
 	assert.Equal(t, eventtype.SpecFinalising, got.SpecVersions[0].Status)

@@ -105,9 +105,25 @@ func CreateServiceAccountWithCredentials(
 			return usecase.Failure[authops.OAuthClientCreated](e)
 		}
 		// 2. Linked SERVICE principal (persistence detail of SA creation).
-		if err := s.WithTx(ctx, func(tx pgx.Tx) error {
+		//    When the SA is created for a specific application, confine it
+		//    exactly like the application-provision flow: AllApplications=false
+		//    plus a single application-access grant, so the token's
+		//    `applications` claim carries only that app and
+		//    sdksync.requireAppAccess confines its writes. The id is stored
+		//    as supplied (no existence check), matching the posture of
+		//    iam_service_accounts.application_id on this endpoint.
+		persistPrincipal := func(tx pgx.Tx) error {
 			return principals.Persist(ctx, saPrincipal, usecasepgx.WrapTxForBootstrap(tx))
-		}); err != nil {
+		}
+		if cmd.ApplicationID != nil && strings.TrimSpace(*cmd.ApplicationID) != "" {
+			saPrincipal.AllApplications = false
+			saPrincipal.AccessibleApplicationIDs = []string{*cmd.ApplicationID}
+			persistPrincipal = func(tx pgx.Tx) error {
+				return principal.AppAccessPersister{Repository: principals}.Persist(
+					ctx, saPrincipal, usecasepgx.WrapTxForBootstrap(tx))
+			}
+		}
+		if err := s.WithTx(ctx, persistPrincipal); err != nil {
 			return usecase.Failure[authops.OAuthClientCreated](
 				usecase.Internal("PERSIST", "service principal persist failed", err))
 		}

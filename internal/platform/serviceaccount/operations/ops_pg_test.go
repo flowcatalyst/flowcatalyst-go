@@ -93,12 +93,36 @@ func TestCreateServiceAccount_HappyPath(t *testing.T) {
 	assert.Equal(t, appID, *got.ApplicationID)
 	assert.Equal(t, serviceaccount.AuthNone, got.WebhookCredentials.AuthType,
 		"no credentials in cmd → NONE")
-	// KNOWN GAP: the op copies cmd.Scope / cmd.ClientIDs onto the aggregate,
-	// but iam_service_accounts has neither column — the repository drops both
-	// at the persist boundary, so a reload always yields nil / empty. Pin
-	// actual behavior; flip when the columns land.
-	assert.Nil(t, got.Scope, "scope is not persisted (no DB column)")
-	assert.Empty(t, got.ClientIDs, "client ids are not persisted (no DB column)")
+	// scope + client_ids persist since migration 035 (pre-035 / Rust rows
+	// read back NULL).
+	require.NotNil(t, got.Scope)
+	assert.Equal(t, scope, *got.Scope)
+	assert.Equal(t, []string{"clt_sacreatehappy"}, got.ClientIDs)
+}
+
+// Without applicationId the standalone path stays unconfined — the
+// NewService default (AllApplications=true, no bindings) is preserved.
+func TestCreateServiceAccountWithCredentials_NoApplicationID_Unconfined(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	pool := testpg.Pool(t)
+	saRepo := serviceaccount.NewRepository(pool)
+	principals := principal.NewRepository(pool)
+	oauthRepo := platformauth.NewRepository(pool).OAuthClients
+	uow := testpg.NewUoW(t)
+
+	res, err := operations.CreateServiceAccountWithCredentials(ctx,
+		saRepo, principals, oauthRepo, uow, operations.CreateCommand{
+			Code: "sawithcreds-unconfined",
+			Name: "Unconfined",
+		}, testpg.TestEC())
+	require.NoError(t, err)
+
+	p, err := principals.FindByID(ctx, res.PrincipalID)
+	require.NoError(t, err)
+	require.NotNil(t, p)
+	assert.True(t, p.AllApplications, "no applicationId → unrestricted on the application axis")
+	assert.Empty(t, p.AccessibleApplicationIDs)
 }
 
 func TestCreateServiceAccount_Validation(t *testing.T) {
@@ -183,13 +207,13 @@ func TestCreateServiceAccountWithCredentials_HappyPath(t *testing.T) {
 	assert.Equal(t, res.SigningSecret, *sa.WebhookCredentials.SigningSecret)
 	require.NotNil(t, sa.ApplicationID)
 	assert.Equal(t, appID, *sa.ApplicationID)
-	assert.Nil(t, sa.Scope, "scope is not persisted (no DB column)")
+	require.NotNil(t, sa.Scope, "scope persists since migration 035")
+	assert.Equal(t, scope, *sa.Scope)
 
-	// 326772d pin: ONLY the application-provision flow app-scopes its SA
-	// principal (AllApplications=false + an app-access binding via
-	// AppAccessPersister). This standalone path persists the principal with
-	// the plain repo, so it keeps the NewService defaults — unrestricted on
-	// the application axis even though cmd.ApplicationID was supplied.
+	// Since migration 035 the standalone path confines its SA principal the
+	// same way the application-provision flow does whenever applicationId is
+	// supplied: AllApplications=false plus a single app-access binding, so
+	// the token's `applications` claim carries exactly that app.
 	p, err := principals.FindByID(ctx, res.PrincipalID)
 	require.NoError(t, err)
 	require.NotNil(t, p)
@@ -198,8 +222,8 @@ func TestCreateServiceAccountWithCredentials_HappyPath(t *testing.T) {
 	assert.Equal(t, sa.ID, *p.ServiceAccountID)
 	assert.Equal(t, principal.ScopeAnchor, p.Scope, "SERVICE principals are anchor-tier")
 	assert.True(t, p.Active)
-	assert.True(t, p.AllApplications, "standalone create does NOT app-scope the principal")
-	assert.Empty(t, p.AccessibleApplicationIDs, "no app-access bindings written")
+	assert.False(t, p.AllApplications, "applicationId supplied → principal is app-scoped")
+	assert.Equal(t, []string{appID}, p.AccessibleApplicationIDs, "single app-access binding written")
 
 	// OAuth client row: CONFIDENTIAL, owned by the principal, with the
 	// client_credentials/refresh_token grants and an encrypted secret ref.

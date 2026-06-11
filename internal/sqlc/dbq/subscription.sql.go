@@ -152,7 +152,7 @@ SELECT id, code, application_code, name, description, client_id,
        client_identifier, client_scoped, target, queue,
        source, status, max_age_seconds, dispatch_pool_id, dispatch_pool_code,
        delay_seconds, sequence, mode, timeout_seconds, max_retries,
-       service_account_id, data_only, created_at, updated_at, connection_id
+       service_account_id, data_only, created_at, updated_at, connection_id, created_by
 FROM msg_subscriptions
 ORDER BY code
 `
@@ -192,6 +192,7 @@ func (q *Queries) SubscriptionFindAll(ctx context.Context) ([]MsgSubscription, e
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.ConnectionID,
+			&i.CreatedBy,
 		); err != nil {
 			return nil, err
 		}
@@ -208,7 +209,7 @@ SELECT id, code, application_code, name, description, client_id,
        client_identifier, client_scoped, target, queue,
        source, status, max_age_seconds, dispatch_pool_id, dispatch_pool_code,
        delay_seconds, sequence, mode, timeout_seconds, max_retries,
-       service_account_id, data_only, created_at, updated_at, connection_id
+       service_account_id, data_only, created_at, updated_at, connection_id, created_by
 FROM msg_subscriptions
 WHERE code = $1 AND client_id IS NULL
 `
@@ -242,6 +243,7 @@ func (q *Queries) SubscriptionFindByCodeAnchor(ctx context.Context, code string)
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ConnectionID,
+		&i.CreatedBy,
 	)
 	return i, err
 }
@@ -251,7 +253,7 @@ SELECT id, code, application_code, name, description, client_id,
        client_identifier, client_scoped, target, queue,
        source, status, max_age_seconds, dispatch_pool_id, dispatch_pool_code,
        delay_seconds, sequence, mode, timeout_seconds, max_retries,
-       service_account_id, data_only, created_at, updated_at, connection_id
+       service_account_id, data_only, created_at, updated_at, connection_id, created_by
 FROM msg_subscriptions
 WHERE code = $1 AND client_id = $2
 `
@@ -290,6 +292,7 @@ func (q *Queries) SubscriptionFindByCodeClient(ctx context.Context, arg Subscrip
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ConnectionID,
+		&i.CreatedBy,
 	)
 	return i, err
 }
@@ -300,7 +303,7 @@ SELECT id, code, application_code, name, description, client_id,
        client_identifier, client_scoped, target, queue,
        source, status, max_age_seconds, dispatch_pool_id, dispatch_pool_code,
        delay_seconds, sequence, mode, timeout_seconds, max_retries,
-       service_account_id, data_only, created_at, updated_at, connection_id
+       service_account_id, data_only, created_at, updated_at, connection_id, created_by
 FROM msg_subscriptions
 WHERE id = $1
 `
@@ -312,9 +315,10 @@ WHERE id = $1
 //   - target (not endpoint)
 //   - msg_subscription_event_types has no filter column
 //   - msg_subscription_custom_configs uses config_key/config_value (not key/value)
-//   - no created_by column on msg_subscriptions
 //
 // All of these were silent runtime bugs in the pre-sqlc repo.
+// created_by was added Go-side in migration 035 (Rust never had it; its
+// rows read back NULL).
 func (q *Queries) SubscriptionFindByID(ctx context.Context, id string) (MsgSubscription, error) {
 	row := q.db.QueryRow(ctx, subscriptionFindByID, id)
 	var i MsgSubscription
@@ -344,6 +348,7 @@ func (q *Queries) SubscriptionFindByID(ctx context.Context, id string) (MsgSubsc
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ConnectionID,
+		&i.CreatedBy,
 	)
 	return i, err
 }
@@ -354,8 +359,8 @@ INSERT INTO msg_subscriptions
      client_scoped, connection_id, target, queue, source, status, max_age_seconds,
      dispatch_pool_id, dispatch_pool_code, delay_seconds, sequence, mode,
      timeout_seconds, max_retries, service_account_id, data_only,
-     created_at, updated_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
+     created_by, created_at, updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
 ON CONFLICT (id) DO UPDATE SET
     name = EXCLUDED.name,
     description = EXCLUDED.description,
@@ -398,6 +403,7 @@ type SubscriptionUpsertParams struct {
 	MaxRetries       int32     `db:"max_retries"`
 	ServiceAccountID *string   `db:"service_account_id"`
 	DataOnly         bool      `db:"data_only"`
+	CreatedBy        *string   `db:"created_by"`
 	CreatedAt        time.Time `db:"created_at"`
 	UpdatedAt        time.Time `db:"updated_at"`
 }
@@ -427,6 +433,7 @@ func (q *Queries) SubscriptionUpsert(ctx context.Context, arg SubscriptionUpsert
 		arg.MaxRetries,
 		arg.ServiceAccountID,
 		arg.DataOnly,
+		arg.CreatedBy,
 		arg.CreatedAt,
 		arg.UpdatedAt,
 	)

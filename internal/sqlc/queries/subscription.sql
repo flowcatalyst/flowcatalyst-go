@@ -5,15 +5,16 @@
 --   - target (not endpoint)
 --   - msg_subscription_event_types has no filter column
 --   - msg_subscription_custom_configs uses config_key/config_value (not key/value)
---   - no created_by column on msg_subscriptions
 -- All of these were silent runtime bugs in the pre-sqlc repo.
+-- created_by was added Go-side in migration 035 (Rust never had it; its
+-- rows read back NULL).
 
 -- name: SubscriptionFindByID :one
 SELECT id, code, application_code, name, description, client_id,
        client_identifier, client_scoped, target, queue,
        source, status, max_age_seconds, dispatch_pool_id, dispatch_pool_code,
        delay_seconds, sequence, mode, timeout_seconds, max_retries,
-       service_account_id, data_only, created_at, updated_at, connection_id
+       service_account_id, data_only, created_at, updated_at, connection_id, created_by
 FROM msg_subscriptions
 WHERE id = $1;
 
@@ -22,7 +23,7 @@ SELECT id, code, application_code, name, description, client_id,
        client_identifier, client_scoped, target, queue,
        source, status, max_age_seconds, dispatch_pool_id, dispatch_pool_code,
        delay_seconds, sequence, mode, timeout_seconds, max_retries,
-       service_account_id, data_only, created_at, updated_at, connection_id
+       service_account_id, data_only, created_at, updated_at, connection_id, created_by
 FROM msg_subscriptions
 WHERE code = $1 AND client_id = $2;
 
@@ -31,7 +32,7 @@ SELECT id, code, application_code, name, description, client_id,
        client_identifier, client_scoped, target, queue,
        source, status, max_age_seconds, dispatch_pool_id, dispatch_pool_code,
        delay_seconds, sequence, mode, timeout_seconds, max_retries,
-       service_account_id, data_only, created_at, updated_at, connection_id
+       service_account_id, data_only, created_at, updated_at, connection_id, created_by
 FROM msg_subscriptions
 WHERE code = $1 AND client_id IS NULL;
 
@@ -40,7 +41,7 @@ SELECT id, code, application_code, name, description, client_id,
        client_identifier, client_scoped, target, queue,
        source, status, max_age_seconds, dispatch_pool_id, dispatch_pool_code,
        delay_seconds, sequence, mode, timeout_seconds, max_retries,
-       service_account_id, data_only, created_at, updated_at, connection_id
+       service_account_id, data_only, created_at, updated_at, connection_id, created_by
 FROM msg_subscriptions
 ORDER BY code;
 
@@ -50,8 +51,8 @@ INSERT INTO msg_subscriptions
      client_scoped, connection_id, target, queue, source, status, max_age_seconds,
      dispatch_pool_id, dispatch_pool_code, delay_seconds, sequence, mode,
      timeout_seconds, max_retries, service_account_id, data_only,
-     created_at, updated_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
+     created_by, created_at, updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
 ON CONFLICT (id) DO UPDATE SET
     name = EXCLUDED.name,
     description = EXCLUDED.description,

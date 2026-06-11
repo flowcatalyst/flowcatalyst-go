@@ -355,10 +355,9 @@ func TestCreateIdpRoleMapping_HappyPath(t *testing.T) {
 	require.NotNil(t, got)
 	assert.Equal(t, "irm-create-upstream", got.IdpRoleName)
 	assert.Equal(t, "irmcreate:admin", got.PlatformRoleName)
-	// KNOWN GAP: oauth_idp_role_mappings has no idp_type column (matches
-	// Rust — it was dropped); the repo ignores it on persist and reads ""
-	// back. Pin actual behavior; the event above still carries the input.
-	assert.Empty(t, got.IdpType, "idp_type is not persisted (no DB column)")
+	// idp_type persists since migration 035 (pre-035 / Rust rows read back
+	// ""). FindByIdpRole deliberately still doesn't filter on it.
+	assert.Equal(t, "keycloak", got.IdpType)
 }
 
 func TestCreateIdpRoleMapping_Validation(t *testing.T) {

@@ -149,10 +149,10 @@ type Querier interface {
 	IdpRoleMappingDelete(ctx context.Context, id string) error
 	IdpRoleMappingFindAll(ctx context.Context) ([]OauthIdpRoleMapping, error)
 	// ── IdpRoleMapping (oauth_idp_role_mappings) ─────────────────────────
-	// Schema columns: id, idp_role_name, internal_role_name, created_at,
-	// updated_at. The Go entity carries an `IdpType` field that has no
-	// backing column today (matches Rust, where the column was dropped);
-	// the field is ignored on persist and reads back as "".
+	// idp_type was added Go-side in migration 035 (Rust had dropped the
+	// column, so its rows read back NULL). It is persisted and echoed, but
+	// FindByIdpRole deliberately does NOT filter on it — pre-035 rows have
+	// NULL idp_type and live mappings must keep matching.
 	IdpRoleMappingFindByID(ctx context.Context, id string) (OauthIdpRoleMapping, error)
 	IdpRoleMappingFindByIdpRole(ctx context.Context, idpRoleName string) ([]OauthIdpRoleMapping, error)
 	IdpRoleMappingUpsert(ctx context.Context, arg IdpRoleMappingUpsertParams) error
@@ -284,8 +284,9 @@ type Querier interface {
 	//   - target (not endpoint)
 	//   - msg_subscription_event_types has no filter column
 	//   - msg_subscription_custom_configs uses config_key/config_value (not key/value)
-	//   - no created_by column on msg_subscriptions
 	// All of these were silent runtime bugs in the pre-sqlc repo.
+	// created_by was added Go-side in migration 035 (Rust never had it; its
+	// rows read back NULL).
 	SubscriptionFindByID(ctx context.Context, id string) (MsgSubscription, error)
 	SubscriptionUpsert(ctx context.Context, arg SubscriptionUpsertParams) error
 	WebauthnCeremonyConsume(ctx context.Context, id string) (json.RawMessage, error)

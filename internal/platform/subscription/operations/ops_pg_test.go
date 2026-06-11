@@ -92,9 +92,10 @@ func TestCreateSubscription_HappyPath(t *testing.T) {
 	assert.Equal(t, desc, *got.Description)
 	require.NotNil(t, got.ServiceAccountID)
 	assert.Equal(t, "sva_subcrthappy1", *got.ServiceAccountID)
-	// NOTE: CreatedBy is set on the aggregate but the subscription repo's
-	// upsert has no created_by column — it is not persisted, so no
-	// post-state assertion is possible.
+	// created_by persists since migration 035 (Rust never wrote it; its
+	// rows read back NULL).
+	require.NotNil(t, got.CreatedBy)
+	assert.Equal(t, testpg.TestEC().PrincipalID, *got.CreatedBy)
 	assert.Equal(t, common.DispatchBlockOnError, got.Mode)
 	assert.Equal(t, int32(60), got.TimeoutSeconds)
 	assert.Equal(t, int32(5), got.MaxRetries)
